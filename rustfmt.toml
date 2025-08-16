@@ -1,0 +1,246 @@
+# rustfmt.toml - MemoryStreamer Code Formatting Configuration
+# High-performance streaming system formatting standards
+# Targeting readability, maintainability, and diff minimization
+
+# =============================================================================
+# GENERAL FORMATTING SETTINGS
+# =============================================================================
+
+# Edition compatibility
+edition = "2024"
+style_edition = "2024"
+
+# Line length - Balanced for complex streaming code with multiple generic parameters
+# 100 chars allows readable complex types while fitting on most screens
+max_width = 100
+
+# Indentation - Standard 4-space indentation for Rust
+tab_spaces = 4
+hard_tabs = false
+
+# =============================================================================
+# IMPORT ORGANIZATION
+# For modular architecture with broker, client, consensus, security modules
+# =============================================================================
+
+# Group imports logically for streaming system architecture
+imports_granularity = "Module"  # Group imports by module for cleaner organization
+group_imports = "StdExternalCrate"  # Group std, external crates, then local
+imports_layout = "Vertical"  # Vertical layout for better diffs
+
+# Reorder imports consistently
+reorder_imports = true
+reorder_modules = true
+
+# =============================================================================
+# FUNCTION AND TYPE FORMATTING
+# Critical for zero-cost abstractions and complex async patterns
+# =============================================================================
+
+# Function signatures - Allow longer signatures for streaming system complexity
+fn_args_layout = "Tall"  # Each parameter on new line for complex signatures
+fn_single_line = false   # Always use multiline for consistency
+
+# Generics formatting - Important for performance-critical generic code
+generics_bound_separator = "OnLine"  # Keep bounds readable
+where_clause_alignment = "AlignWhere"  # Align where clauses consistently
+
+# Type formatting - Support complex streaming types
+type_punctuation_density = "Wide"  # Space around punctuation for readability
+
+# =============================================================================
+# CONTROL FLOW FORMATTING
+# Async/await patterns and error handling
+# =============================================================================
+
+# Brace style - Consistent with Rust conventions
+brace_style = "SameLineWhere"
+control_brace_style = "AlwaysSameLine"
+
+# Chain formatting - Important for builder patterns and async chains
+chain_width = 80  # Keep chains readable
+chains_overflow_last = false
+
+# Conditional formatting
+condense_wildcard_suffixes = true
+force_explicit_abi = true
+
+# =============================================================================
+# COLLECTION AND STRUCT FORMATTING
+# Message structures and configuration objects
+# =============================================================================
+
+# Array and struct formatting
+array_width = 80
+struct_field_align_threshold = 30
+struct_lit_single_line = false  # Always multiline for consistency
+
+# Use field initialization shorthand when possible
+use_field_init_shorthand = true
+
+# Small arrays can be single line, but prefer multiline for consistency
+use_small_heuristics = "Max"
+
+# =============================================================================
+# STRING AND LITERAL FORMATTING
+# Protocol messages and configuration strings
+# =============================================================================
+
+# String formatting
+format_strings = true
+format_macro_matchers = true
+normalize_comments = true
+normalize_doc_attributes = true
+
+# Hex literal formatting for performance-critical constants
+hex_literal_case = "Upper"
+
+# =============================================================================
+# COMMENT AND DOCUMENTATION FORMATTING
+# Critical for complex distributed system documentation
+# =============================================================================
+
+# Comment formatting
+comment_width = 90  # Slightly narrower than code for readability
+wrap_comments = true
+doc_comment_code_block_width = 90
+
+# Preserve some formatting in comments for ASCII art diagrams
+format_code_in_doc_comments = true
+
+# =============================================================================
+# ASYNC/AWAIT AND CLOSURE FORMATTING
+# Tokio-based streaming system patterns
+# =============================================================================
+
+# Closure formatting - Important for high-performance functional patterns
+closure_block_indent_threshold = 10
+combine_control_expr = false  # Keep control expressions clear
+
+# Async formatting
+async_fn_non_first_line_arg_new_line = true
+
+# =============================================================================
+# PERFORMANCE-ORIENTED FORMATTING
+# Optimize for hot path readability
+# =============================================================================
+
+# Expression formatting
+binop_separator = "Front"  # Operators at front of line for readability
+blank_lines_lower_bound = 0
+blank_lines_upper_bound = 2
+
+# Overflow handling - Prefer readability over compactness
+overflow_delimited_expr = true
+force_multiline_blocks = false
+
+# =============================================================================
+# MACRO FORMATTING
+# Performance macros and code generation
+# =============================================================================
+
+# Macro formatting
+format_macro_bodies = true
+skip_macro_invocations = []  # Format all macros for consistency
+
+# =============================================================================
+# ADVANCED FORMATTING OPTIONS
+# Fine-tuning for streaming system code patterns
+# =============================================================================
+
+# Miscellaneous formatting options
+empty_item_single_line = false  # Consistent multiline even for empty items
+enum_discrim_align_threshold = 30
+match_arm_blocks = true
+match_arm_leading_pipes = "Preserve"
+match_block_trailing_comma = true
+
+# Version compatibility
+version = "Two"  # Use rustfmt version 2 features
+
+# Trailing elements
+trailing_comma = "Vertical"  # Add trailing commas for better diffs
+trailing_semicolon = false
+
+# =============================================================================
+# DIFF AND COLLABORATION OPTIMIZATION
+# Settings to minimize noise in code reviews
+# =============================================================================
+
+# Consistent spacing and alignment
+spaces_around_ranges = false
+space_after_colon = true
+space_before_colon = false
+
+# Merge derives for cleaner diffs
+merge_derives = true
+
+# Single line formatting - Prefer multiline for consistency
+single_line_if_else_max_width = 0  # Always multiline if/else
+
+# =============================================================================
+# MODULE AND ITEM ORDERING
+# Consistent organization for large streaming system codebase
+# =============================================================================
+
+# Item ordering within modules
+reorder_impl_items = true
+
+# =============================================================================
+# ERROR HANDLING FORMATTING
+# Critical for Result<T, E> patterns throughout the system
+# =============================================================================
+
+# Match expression formatting for error handling
+match_arm_blocks = true
+newline_on_empty_second_statement = true
+
+# =============================================================================
+# CONFIGURATION NOTES
+# =============================================================================
+
+# This rustfmt configuration is designed for the MemoryStreamer project with:
+#
+# 1. READABILITY FOCUS:
+#    - 100 character line limit balances complexity with screen width
+#    - Consistent multiline formatting reduces cognitive load
+#    - Clear import organization matches modular architecture
+#
+# 2. PERFORMANCE CODE SUPPORT:
+#    - Accommodates complex generic types for zero-cost abstractions
+#    - Readable formatting for async/await patterns
+#    - Clear formatting for performance-critical function signatures
+#
+# 3. COLLABORATION OPTIMIZATION:
+#    - Trailing commas and consistent multiline reduce diff noise
+#    - Organized imports and consistent brace styles
+#    - Clear comment formatting for complex system documentation
+#
+# 4. PROJECT ALIGNMENT:
+#    - Supports the coding patterns established in CLAUDE.md
+#    - Complements the clippy.toml linting configuration
+#    - Optimized for the modular architecture (broker, client, consensus, security)
+#
+# 5. MAINTENANCE BENEFITS:
+#    - Consistent formatting across all team members
+#    - Reduced time spent on formatting decisions
+#    - Clear, reviewable code structure for complex distributed systems
+
+# =============================================================================
+# USAGE NOTES
+# =============================================================================
+
+# To format the entire project:
+# cargo fmt
+#
+# To check formatting without changing files:
+# cargo fmt -- --check
+#
+# To format specific file:
+# cargo fmt path/to/file.rs
+#
+# This configuration prioritizes:
+# 1. Consistency across the entire codebase
+# 2. Readability for complex streaming system logic
+# 3. Minimal diff noise for better code reviews
+# 4. Support for high-performance Rust patterns
