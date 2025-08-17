@@ -9,16 +9,16 @@ use std::time::Duration;
 pub struct ConsumerConfig {
     /// Broker addresses to connect to
     pub brokers: Vec<SocketAddr>,
-    
+
     /// Consumer group ID
     pub group_id: String,
-    
+
     /// Connection configuration
     pub connection: ConnectionConfig,
-    
+
     /// Consumption configuration
     pub consumption: ConsumptionConfig,
-    
+
     /// Offset management configuration
     pub offset: OffsetConfig,
 }
@@ -28,13 +28,13 @@ pub struct ConsumerConfig {
 pub struct ConnectionConfig {
     /// Connection timeout
     pub timeout: Duration,
-    
+
     /// Session timeout for consumer group coordination
     pub session_timeout: Duration,
-    
+
     /// Heartbeat interval
     pub heartbeat_interval: Duration,
-    
+
     /// Enable TLS
     pub tls_enabled: bool,
 }
@@ -44,13 +44,13 @@ pub struct ConnectionConfig {
 pub struct ConsumptionConfig {
     /// Maximum number of messages to fetch in one request
     pub max_fetch_size: usize,
-    
+
     /// Minimum bytes to fetch in one request
     pub min_fetch_bytes: usize,
-    
+
     /// Maximum time to wait for fetch request
     pub fetch_timeout: Duration,
-    
+
     /// Enable automatic processing
     pub auto_process: bool,
 }
@@ -60,10 +60,10 @@ pub struct ConsumptionConfig {
 pub struct OffsetConfig {
     /// Enable automatic offset commits
     pub auto_commit: bool,
-    
+
     /// Interval for automatic offset commits
     pub auto_commit_interval: Duration,
-    
+
     /// What to do when there's no initial offset
     pub reset_policy: OffsetResetPolicy,
 }

@@ -63,8 +63,8 @@ pprof = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
 codspeed-criterion-compat = { workspace = true, optional = true }
 
-# Core async runtime
-tokio = { workspace = true }
+# Core async runtime - SECURITY UPDATED
+tokio = { workspace = true }  # Now inherits secure 1.35.1
 futures = { workspace = true }
 async-trait = { workspace = true }
 
@@ -75,10 +75,11 @@ serde_json = { workspace = true }
 bincode = { workspace = true }
 smallvec = { workspace = true }
 
-# Performance and concurrency
+# Performance and concurrency - SECURITY UPDATED
 crossbeam = { workspace = true }
 crossbeam-channel = { workspace = true }
-crossbeam-queue = { workspace = true }
+crossbeam-queue = { workspace = true }  # Now inherits secure 0.3.11
+crossbeam-utils = { workspace = true }  # Now inherits secure 0.8.19
 parking_lot = { workspace = true }
 rayon = { workspace = true }
 dashmap = { workspace = true }

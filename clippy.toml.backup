@@ -1,0 +1,275 @@
+# clippy.toml - MemoryStreamer Clippy Configuration
+# Ultra-strict linting for high-performance streaming system
+# Targeting 10M+ messages/second and <10μs latency
+
+# =============================================================================
+# SAFETY-CRITICAL LINTS (DENY LEVEL)
+# These can cause crashes, undefined behavior, or security issues
+# =============================================================================
+
+# Panic and Error Handling - ZERO TOLERANCE
+# In a high-performance streaming system, panics are unacceptable
+unwrap-used = "deny"
+expect-used = "deny" 
+panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+unreachable = "deny"
+
+# Memory Safety - CRITICAL for performance systems
+# Manual memory management can cause security vulnerabilities
+manual-memcpy = "deny"
+manual-non-exhaustive = "deny"
+mem-forget = "deny"
+mem-replace-with-default = "deny"
+
+# Undefined Behavior Prevention
+cast-ptr-alignment = "deny"
+invalid-utf8-in-unchecked = "deny"
+undocumented-unsafe-blocks = "deny"
+
+# Integer Safety - Overflow/underflow can corrupt data
+integer-arithmetic = "warn"  # Allow but warn - common in performance code
+integer-division = "warn"
+
+# =============================================================================
+# PERFORMANCE LINTS (WARN LEVEL)
+# These impact the 10M+ messages/second target
+# =============================================================================
+
+# Memory Allocation - Minimize heap allocations
+box-collection = "warn"
+rc-buffer = "warn"
+vec-box = "warn"
+large-stack-arrays = "warn"
+
+# Inefficient Operations - Hot path optimizations
+inefficient-to-string = "warn"
+string-add = "warn"
+string-add-assign = "warn"
+str-to-string = "warn"
+unnecessary-to-owned = "warn"
+
+# Collection Performance
+linkedlist = "warn"
+iter-nth-zero = "warn"
+iter-nth = "warn"
+iter-skip-next = "warn"
+
+# Indexing and Bounds Checking - Prefer iterators for performance
+indexing-slicing = "warn"
+get-unwrap = "warn"
+
+# Concurrency Performance - Critical for streaming systems
+mutex-atomic = "warn"
+arc-with-non-send-sync = "warn"
+mutex-integer = "warn"
+
+# =============================================================================
+# CODE QUALITY LINTS
+# Maintain high code quality for complex streaming logic
+# =============================================================================
+
+# Complexity Management - Balance readability with performance needs
+cognitive-complexity-threshold = 15  # Slightly higher for performance code
+type-complexity-threshold = 200      # Allow complex types for zero-cost abstractions
+too-many-arguments-threshold = 8     # Higher for configuration objects
+too-many-lines-threshold = 150       # Reasonable for performance-critical functions
+
+# Documentation Requirements - Critical for distributed system
+missing-docs-in-private-items = "warn"
+missing-errors-doc = "warn"
+missing-panics-doc = "warn"
+missing-safety-doc = "warn"
+
+# Naming and Style
+enum-variant-names = "warn"
+module-name-repetitions = "warn"
+similar-names = "warn"
+single-char-lifetime = "warn"
+
+# Error Handling Quality
+result-large-err = "warn"
+result-unit-err = "warn"
+
+# =============================================================================
+# ASYNC/AWAIT LINTS
+# Critical for Tokio-based streaming system
+# =============================================================================
+
+# Async Performance
+future-not-send = "warn"
+async-yields-async = "warn"
+
+# Blocking Operations - Never block in async context
+blocking-in-async = "deny"
+
+# =============================================================================
+# SECURITY LINTS
+# Security is critical for production streaming systems
+# =============================================================================
+
+# Cryptographic Safety
+weak-rng = "deny"
+
+# Input Validation
+suspicious = "warn"
+
+# =============================================================================
+# PEDANTIC LINTS (SELECTIVE)
+# Enable specific pedantic lints that help with streaming system quality
+# =============================================================================
+
+# These pedantic lints are particularly valuable for high-performance systems
+cast-possible-truncation = "warn"
+cast-possible-wrap = "warn"
+cast-precision-loss = "warn"
+cast-sign-loss = "warn"
+
+# Explicit is better than implicit for performance-critical code
+implicit-clone = "warn"
+implicit-saturating-sub = "warn"
+
+# Pattern Matching Quality
+match-same-arms = "warn"
+match-wildcard-for-single-variants = "warn"
+
+# Function Quality
+fn-params-excessive-bools = "warn"
+trivially-copy-pass-by-ref = "warn"
+
+# =============================================================================
+# NURSERY LINTS (EXPERIMENTAL)
+# Enable promising experimental lints
+# =============================================================================
+
+# These are experimental but useful for streaming systems
+option-if-let-else = "warn"
+branches-sharing-code = "warn"
+
+# =============================================================================
+# RESTRICTION LINTS (SELECTIVE)
+# Enable specific restriction lints for streaming system safety
+# =============================================================================
+
+# Prevent common streaming system antipatterns
+as-conversions = "warn"           # Be explicit about type conversions
+clone-on-ref-ptr = "warn"         # Avoid unnecessary Arc/Rc clones
+create-dir = "warn"               # File operations should be explicit
+dbg-macro = "warn"                # No debug prints in production
+decimal-literal-representation = "warn"
+default-numeric-fallback = "warn"
+deref-by-slicing = "warn"
+disallowed-script-idents = "warn"
+else-if-without-else = "warn"     # Complete pattern matching
+empty-structs-with-brackets = "warn"
+equatable-if-let = "warn"
+exhaustive-enums = "warn"         # All enum variants must be handled
+exhaustive-structs = "warn"       # All struct fields must be initialized
+exit = "deny"                     # Never call exit() in streaming system
+filetype-is-file = "warn"
+float-cmp-const = "warn"
+fn-to-numeric-cast-any = "warn"
+format-push-string = "warn"
+get-first = "warn"
+if-then-some-else-none = "warn"
+impl-trait-in-params = "warn"
+indexing-slicing = "warn"         # Already set above, but important
+infinite-loop = "warn"            # Infinite loops should be explicit
+inline-asm-x86-att-syntax = "warn"
+inline-asm-x86-intel-syntax = "warn"
+integer-division = "warn"         # Already set above
+large-include-file = "warn"
+let-underscore-must-use = "warn"
+lossy-float-literal = "warn"
+map-err-ignore = "warn"
+mem-forget = "deny"               # Already set above
+missing-assert-message = "warn"
+missing-asserts-for-indexing = "warn"
+mixed-read-write-in-expression = "warn"
+mod-module-files = "warn"
+multiple-inherent-impl = "warn"
+mutex-atomic = "warn"             # Already set above
+non-ascii-literal = "warn"
+panic-in-result-fn = "deny"       # Result functions should not panic
+partial-pub-fields = "warn"
+print-stderr = "warn"             # Use logging instead
+print-stdout = "warn"             # Use logging instead
+pub-use = "warn"
+rc-buffer = "warn"                # Already set above
+rc-mutex = "warn"
+redundant-type-annotations = "warn"
+ref-patterns = "warn"
+rest-pat-in-fully-bound-structs = "warn"
+same-name-method = "warn"
+self-named-module-files = "warn"
+semicolon-inside-block = "warn"
+shadow-reuse = "warn"             # Variable shadowing can hide bugs
+shadow-same = "warn"
+shadow-unrelated = "warn"
+single-call-fn = "warn"
+str-to-string = "warn"            # Already set above
+string-add = "warn"               # Already set above
+string-lit-as-bytes = "warn"
+string-slice = "warn"
+string-to-string = "warn"
+suspicious-xor-used-as-pow = "warn"
+todo = "deny"                     # Already set above
+try-err = "warn"
+undocumented-unsafe-blocks = "deny" # Already set above
+unimplemented = "deny"            # Already set above
+unnecessary-safety-comment = "warn"
+unnecessary-safety-doc = "warn"
+unneeded-field-pattern = "warn"
+unreachable = "deny"              # Already set above
+unseparated-literal-suffix = "warn"
+unwrap-used = "deny"              # Already set above
+use-debug = "warn"
+verbose-file-reads = "warn"
+wildcard-enum-match-arm = "warn"
+
+# =============================================================================
+# ALLOWED LINTS
+# Explicitly allow certain lints that may conflict with performance goals
+# =============================================================================
+
+# Performance sometimes requires complexity
+type-complexity = "allow"         # Complex types for zero-cost abstractions
+too-many-arguments = "allow"       # Configuration objects may need many params
+
+# Sometimes necessary for FFI or unsafe code
+cast-ptr-alignment = "allow"       # May be needed for SIMD or FFI
+missing-transmute-annotations = "allow"
+
+# =============================================================================
+# PROJECT-SPECIFIC CONFIGURATION
+# =============================================================================
+
+# Increase limits for streaming system complexity
+cognitive-complexity-threshold = 15
+type-complexity-threshold = 200
+too-many-arguments-threshold = 8
+too-many-lines-threshold = 150
+large-stack-arrays-threshold = 1024  # Allow larger arrays for performance
+
+# Single letter variable names are OK for mathematical operations
+single-char-lifetime-names-threshold = 2
+
+# Allow longer boolean chains for complex authorization logic
+nonminimal-bool-threshold = 5
+
+# =============================================================================
+# PERFORMANCE NOTES
+# =============================================================================
+
+# This configuration prioritizes:
+# 1. Safety and correctness (deny panics, unwraps)
+# 2. Performance (warn on allocations, inefficient operations)
+# 3. Maintainability (complexity limits, documentation)
+# 4. Security (input validation, cryptographic safety)
+#
+# The configuration is tuned for a high-performance streaming system where:
+# - Every allocation matters
+# - Panics are unacceptable
+# - Complex types may be necessary for zero-cost abstractions
+# - Security and correctness cannot be compromised for performance

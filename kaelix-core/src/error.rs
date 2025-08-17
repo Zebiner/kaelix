@@ -7,27 +7,47 @@ use thiserror::Error;
 pub enum Error {
     /// Invalid message format or content
     #[error("Invalid message: {message}")]
-    InvalidMessage { message: String },
+    InvalidMessage {
+        /// Error message describing what was invalid
+        message: String,
+    },
 
     /// Serialization/deserialization errors
     #[error("Serialization error: {message}")]
-    Serialization { message: String },
+    Serialization {
+        /// Error message describing the serialization issue
+        message: String,
+    },
 
     /// Stream processing errors
     #[error("Stream error: {message}")]
-    Stream { message: String },
+    Stream {
+        /// Error message describing the stream issue
+        message: String,
+    },
 
     /// Resource limits exceeded
     #[error("Resource limit exceeded: {resource} ({limit})")]
-    ResourceLimit { resource: String, limit: String },
+    ResourceLimit {
+        /// Name of the resource that exceeded its limit
+        resource: String,
+        /// The limit that was exceeded
+        limit: String,
+    },
 
     /// Configuration errors
     #[error("Configuration error: {message}")]
-    Configuration { message: String },
+    Configuration {
+        /// Error message describing the configuration issue
+        message: String,
+    },
 
     /// Internal system errors
     #[error("Internal error: {message}")]
-    Internal { message: String },
+    Internal {
+        /// Error message describing the internal issue
+        message: String,
+    },
 }
 
 /// Result type alias for Kaelix operations.
@@ -35,16 +55,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
-        Error::Serialization {
-            message: err.to_string(),
-        }
+        Self::Serialization { message: err.to_string() }
     }
 }
 
 impl From<bincode::Error> for Error {
     fn from(err: bincode::Error) -> Self {
-        Error::Serialization {
-            message: err.to_string(),
-        }
+        Self::Serialization { message: err.to_string() }
     }
 }

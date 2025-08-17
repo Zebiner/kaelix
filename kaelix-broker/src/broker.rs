@@ -1,7 +1,7 @@
 //! Core broker implementation.
 
 use crate::config::BrokerConfig;
-use kaelix_core::{Result, Message};
+use kaelix_core::{Message, Result};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -27,16 +27,23 @@ pub struct BrokerHandle {
 
 impl Broker {
     /// Create a new broker instance with the given configuration.
-    pub async fn new(config: BrokerConfig) -> Result<Self> {
-        let state = Arc::new(RwLock::new(BrokerState {
-            running: false,
-            client_count: 0,
-        }));
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the broker configuration is invalid or if
+    /// initialization resources cannot be allocated.
+    pub fn new(config: BrokerConfig) -> Result<Self> {
+        let state = Arc::new(RwLock::new(BrokerState { running: false, client_count: 0 }));
 
         Ok(Self { config, state })
     }
 
     /// Start the broker and begin accepting connections.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the broker is already running or if network
+    /// listeners cannot be started.
     pub async fn start(&self) -> Result<BrokerHandle> {
         let mut state = self.state.write().await;
         if state.running {
@@ -51,18 +58,22 @@ impl Broker {
         // TODO: Start network listeners, storage engines, etc.
 
         Ok(BrokerHandle {
-            broker: Arc::new(Self {
-                config: self.config.clone(),
-                state: Arc::clone(&self.state),
-            }),
+            broker: Arc::new(Self { config: self.config.clone(), state: Arc::clone(&self.state) }),
         })
     }
 
     /// Stop the broker gracefully.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if graceful shutdown cannot be completed within
+    /// the configured timeout period.
     pub async fn stop(&self) -> Result<()> {
-        let mut state = self.state.write().await;
-        state.running = false;
-        
+        {
+            let mut state = self.state.write().await;
+            state.running = false;
+        }
+
         // TODO: Graceful shutdown of connections and storage
 
         Ok(())
@@ -81,7 +92,12 @@ impl Broker {
 
 impl BrokerHandle {
     /// Publish a message to a topic.
-    pub async fn publish(&self, message: Message) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message cannot be published due to topic
+    /// validation failures, storage issues, or broker shutdown.
+    pub fn publish(&self, _message: Message) -> Result<()> {
         // TODO: Implement message publishing
         Ok(())
     }

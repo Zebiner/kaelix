@@ -11,11 +11,9 @@ pub struct MessageBatch {
 
 impl MessageBatch {
     /// Create a new message batch.
+    #[must_use]
     pub fn new(max_size: usize) -> Self {
-        Self {
-            messages: Vec::with_capacity(max_size),
-            max_size,
-        }
+        Self { messages: Vec::with_capacity(max_size), max_size }
     }
 
     /// Add a message to the batch.
@@ -29,17 +27,20 @@ impl MessageBatch {
     }
 
     /// Check if the batch is full.
-    pub fn is_full(&self) -> bool {
+    #[must_use]
+    pub const fn is_full(&self) -> bool {
         self.messages.len() >= self.max_size
     }
 
     /// Check if the batch is empty.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
 
     /// Get the number of messages in the batch.
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.messages.len()
     }
 

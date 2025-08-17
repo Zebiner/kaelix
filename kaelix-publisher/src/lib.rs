@@ -1,6 +1,6 @@
 //! # Kaelix Publisher
 //!
-//! High-performance message publisher client for the MemoryStreamer distributed streaming system.
+//! High-performance message publisher client for the `MemoryStreamer` distributed streaming system.
 //!
 //! This crate provides:
 //! - High-throughput message publishing
@@ -37,17 +37,17 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
-pub mod publisher;
+pub mod batch;
 pub mod config;
 pub mod connection;
-pub mod batch;
+pub mod publisher;
 
-pub use publisher::{Publisher, PublishResult};
 pub use config::PublisherConfig;
 pub use kaelix_core::{Error, Result};
+pub use publisher::{PublishResult, Publisher};
 
 /// Re-export commonly used types
 pub mod prelude {
-    pub use crate::{Publisher, PublisherConfig, PublishResult};
+    pub use crate::{PublishResult, Publisher, PublisherConfig};
     pub use kaelix_core::prelude::*;
 }

@@ -9,13 +9,13 @@ use std::time::Duration;
 pub struct PublisherConfig {
     /// Broker addresses to connect to
     pub brokers: Vec<SocketAddr>,
-    
+
     /// Connection configuration
     pub connection: ConnectionConfig,
-    
+
     /// Batching configuration for performance
     pub batching: BatchConfig,
-    
+
     /// Retry configuration
     pub retry: RetryConfig,
 }
@@ -25,13 +25,13 @@ pub struct PublisherConfig {
 pub struct ConnectionConfig {
     /// Connection timeout
     pub timeout: Duration,
-    
+
     /// Keep-alive interval
     pub keep_alive: Duration,
-    
+
     /// Maximum number of connections per broker
     pub max_connections_per_broker: usize,
-    
+
     /// Enable TLS
     pub tls_enabled: bool,
 }
@@ -41,10 +41,10 @@ pub struct ConnectionConfig {
 pub struct BatchConfig {
     /// Maximum batch size
     pub max_batch_size: usize,
-    
+
     /// Maximum time to wait before sending a partial batch
     pub linger_ms: u64,
-    
+
     /// Enable automatic batching
     pub auto_batch: bool,
 }
@@ -54,13 +54,13 @@ pub struct BatchConfig {
 pub struct RetryConfig {
     /// Maximum number of retry attempts
     pub max_retries: usize,
-    
+
     /// Initial retry delay
     pub initial_delay: Duration,
-    
+
     /// Maximum retry delay
     pub max_delay: Duration,
-    
+
     /// Backoff multiplier
     pub backoff_multiplier: f64,
 }
@@ -89,11 +89,7 @@ impl Default for ConnectionConfig {
 
 impl Default for BatchConfig {
     fn default() -> Self {
-        Self {
-            max_batch_size: 1000,
-            linger_ms: 10,
-            auto_batch: true,
-        }
+        Self { max_batch_size: 1000, linger_ms: 10, auto_batch: true }
     }
 }
 

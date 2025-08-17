@@ -1,6 +1,6 @@
 //! # Kaelix Core
 //!
-//! Core streaming library for the MemoryStreamer ultra-high-performance distributed streaming system.
+//! Core streaming library for the `MemoryStreamer` ultra-high-performance distributed streaming system.
 //!
 //! This crate provides the fundamental building blocks for:
 //! - Message definitions and serialization
@@ -36,7 +36,7 @@ pub mod types;
 
 pub use error::{Error, Result};
 pub use message::{Message, MessageId, Topic};
-pub use types::{Timestamp, Offset, PartitionId};
+pub use types::{Offset, PartitionId, Timestamp};
 
 /// Re-export commonly used types for convenience
 pub mod prelude {

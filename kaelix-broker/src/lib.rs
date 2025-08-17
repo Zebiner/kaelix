@@ -1,6 +1,6 @@
 //! # Kaelix Broker
 //!
-//! High-performance message broker implementation for the MemoryStreamer distributed streaming system.
+//! High-performance message broker implementation for the `MemoryStreamer` distributed streaming system.
 //!
 //! This crate provides:
 //! - Message routing and delivery
@@ -22,7 +22,7 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = BrokerConfig::default();
-//! let broker = Broker::new(config).await?;
+//! let broker = Broker::new(config)?;
 //! broker.start().await?;
 //! # Ok(())
 //! # }
@@ -35,9 +35,9 @@
 
 pub mod broker;
 pub mod config;
-pub mod storage;
 pub mod network;
 pub mod routing;
+pub mod storage;
 
 pub use broker::{Broker, BrokerHandle};
 pub use config::BrokerConfig;

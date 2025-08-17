@@ -8,7 +8,8 @@ pub struct NetworkServer {
 
 impl NetworkServer {
     /// Create a new network server.
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {}
     }
 }

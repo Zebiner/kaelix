@@ -9,19 +9,37 @@ MemoryStreamer is an ultra-high-performance distributed streaming system designe
 
 [... previous sections remain unchanged ...]
 
-### 6. Quality Enforcement: Zero-Tolerance Framework
+### 6. Quality Enforcement: Enhanced Zero-Tolerance Framework
 
 #### Compilation Rules: Absolute Correctness
-- **ZERO TOLERANCE** for compilation errors
-- ALL compilation warnings must be treated as blocking errors
+- **ZERO TOLERANCE** for compilation errors AND warnings
+- ALL `cargo check --workspace` warnings must be treated as blocking errors
+- ALL `cargo clippy --workspace -- -D warnings` warnings must be treated as blocking errors
 - Developers MUST resolve ALL warnings before task completion
+- Use `cargo check` instead of `cargo build` for enhanced developer experience
 - No exceptions, no partial merges
 
 ```bash
-# Strict compilation enforcement
-cargo check --workspace
-cargo clippy --workspace -- -D warnings
+# Enhanced zero-tolerance enforcement
+cargo check --workspace          # Must pass with ZERO warnings
+cargo clippy --workspace -- -D warnings  # Must pass with ZERO warnings
+cargo fmt --all --check         # Must pass with ZERO violations
+cargo audit                     # Must pass with ZERO vulnerabilities
 ```
+
+#### Systematic Remediation Process
+1. **Configuration Cleanup**: Fix duplicate keys, validate TOML syntax
+2. **Security Hardening**: Update all vulnerable dependencies
+3. **Warning Elimination**: Address unused variables, missing documentation
+4. **Async Optimization**: Remove unnecessary async keywords
+5. **Documentation Compliance**: Ensure all public APIs documented
+6. **Validation**: Multi-stage verification of all quality checks
+
+#### Common Warning Patterns & Fixes
+- Unused variables: Prefix with `_` or remove if truly unused
+- Missing documentation: Add `///` comments with proper markdown
+- Unnecessary async: Remove `async` from functions without `.await`
+- Dead code: Use `#[allow(dead_code)]` judiciously or implement functionality
 
 #### Formatting Compliance
 - `cargo fmt` is MANDATORY for every code change
@@ -97,7 +115,7 @@ jobs:
   - Performance regressions
   - Code complexity indices
 
-By implementing this Zero-Tolerance Quality Enforcement Framework, we ensure:
+By implementing this Enhanced Zero-Tolerance Quality Enforcement Framework, we ensure:
 - Uncompromising code quality
 - Consistent development standards
 - Predictable and reliable software evolution

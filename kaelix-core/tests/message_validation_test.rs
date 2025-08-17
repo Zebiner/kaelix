@@ -1,6 +1,6 @@
 //! Message Validation Test for MemoryStreamer
 
-const MAX_MESSAGE_SIZE: usize = 1_048_576;  // 1 MB
+const MAX_MESSAGE_SIZE: usize = 1_048_576; // 1 MB
 
 #[derive(Debug, Clone)]
 struct Message {
@@ -14,11 +14,11 @@ impl Message {
         if topic.is_empty() {
             return Err("Empty topic not allowed");
         }
-        
+
         if payload.len() > MAX_MESSAGE_SIZE {
             return Err("Payload too large");
         }
-        
+
         Ok(Self {
             topic,
             payload,
@@ -36,28 +36,19 @@ mod tests {
 
     #[test]
     fn test_message_creation_success() {
-        let msg = Message::new(
-            "test_topic".to_string(), 
-            vec![1, 2, 3, 4]
-        );
+        let msg = Message::new("test_topic".to_string(), vec![1, 2, 3, 4]);
         assert!(msg.is_ok());
     }
 
     #[test]
     fn test_message_validation_failure() {
         // Empty topic
-        let empty_topic_result = Message::new(
-            "".to_string(), 
-            vec![1, 2, 3]
-        );
+        let empty_topic_result = Message::new("".to_string(), vec![1, 2, 3]);
         assert!(empty_topic_result.is_err());
 
         // Oversized payload
         let large_payload = vec![0; MAX_MESSAGE_SIZE + 1];
-        let large_payload_result = Message::new(
-            "test_topic".to_string(), 
-            large_payload
-        );
+        let large_payload_result = Message::new("test_topic".to_string(), large_payload);
         assert!(large_payload_result.is_err());
     }
 
@@ -67,10 +58,7 @@ mod tests {
         let iterations = 100_000;
 
         for _ in 0..iterations {
-            let _msg = Message::new(
-                "bench_topic".to_string(), 
-                vec![42; 128]
-            ).unwrap();
+            let _msg = Message::new("bench_topic".to_string(), vec![42; 128]).unwrap();
         }
 
         let duration = start.elapsed();

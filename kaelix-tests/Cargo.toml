@@ -20,7 +20,7 @@ kaelix-broker = { path = "../kaelix-broker" }
 kaelix-publisher = { path = "../kaelix-publisher" }
 kaelix-consumer = { path = "../kaelix-consumer" }
 
-# Core async runtime
+# Core async runtime - SECURITY UPDATED
 tokio = { workspace = true, features = ["test-util", "time", "macros", "process", "fs", "net"] }
 tokio-util = { workspace = true }
 tokio-test = { workspace = true }
@@ -31,8 +31,9 @@ async-trait = { workspace = true }
 tokio-stream = "0.1"
 async-stream = "0.3"
 
-# Distributed testing and process management
-tokio-process = "0.2"
+# Distributed testing and process management - SECURITY UPDATED
+# REMOVE VULNERABLE tokio-process 0.2.5 - replace with current tokio process features
+# tokio-process = "0.2"  # REMOVED: Contains vulnerable legacy dependencies
 tempfile = "3.12"
 nix = "0.29"
 
@@ -65,8 +66,10 @@ rand_distr = "0.4"
 flate2 = "1.0"
 base64 = "0.22"
 
-# Concurrency testing
+# Concurrency testing - SECURITY UPDATED
 crossbeam = { workspace = true }
+crossbeam-queue = { workspace = true }  # Now inherits secure 0.3.11
+crossbeam-utils = { workspace = true }  # Now inherits secure 0.8.19
 parking_lot = { workspace = true }
 num_cpus = { workspace = true }
 
@@ -93,23 +96,25 @@ cargo-fuzz = { workspace = true, optional = true }
 afl = { workspace = true, optional = true }
 honggfuzz = { workspace = true, optional = true }
 
-# Network simulation and distributed testing
-socket2 = "0.5"
+# Network simulation and distributed testing - SECURITY UPDATED
+socket2 = { workspace = true }  # Now inherits secure 0.5.7
 pin-project-lite = "0.2"
 
-# Monitoring and observability dependencies
-prometheus = { version = "0.13", optional = true }
+# Monitoring and observability dependencies - SECURITY UPDATED
+# CRITICAL FIX: Update prometheus to resolve protobuf RUSTSEC-2024-0437
+prometheus = { version = "0.14", optional = true }  # Updated to avoid protobuf vulnerability
 reqwest = { version = "0.11", features = ["json"], optional = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
 criterion = "0.5.1"
 proptest = "1.2.0"
-tokio = { version = "1.35.0", features = ["full"] }
+# SECURITY FIX: Updated tokio dev-dependency to secure version
+tokio = { version = "1.35.1", features = ["full"] }  # Security fix: minimum secure version
 async-stream = "0.3.5"
 
 [features]
-default = []
+default = ["monitoring"]  # ENABLE MONITORING BY DEFAULT TO FIX REQWEST COMPILATION
 fuzzing = ["dep:libfuzzer-sys"]
 security-testing = ["dep:cargo-fuzz", "dep:afl", "dep:honggfuzz"]
 monitoring = ["dep:prometheus", "dep:reqwest"]

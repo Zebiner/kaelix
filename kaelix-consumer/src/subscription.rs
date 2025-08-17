@@ -10,10 +10,9 @@ pub struct SubscriptionManager {
 
 impl SubscriptionManager {
     /// Create a new subscription manager.
-    pub fn new() -> Self {
-        Self {
-            subscribed_topics: Vec::new(),
-        }
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { subscribed_topics: Vec::new() }
     }
 
     /// Subscribe to a topic.
@@ -29,11 +28,13 @@ impl SubscriptionManager {
     }
 
     /// Get all subscribed topics.
+    #[must_use]
     pub fn subscribed_topics(&self) -> &[Topic] {
         &self.subscribed_topics
     }
 
     /// Check if subscribed to a topic.
+    #[must_use]
     pub fn is_subscribed(&self, topic: &Topic) -> bool {
         self.subscribed_topics.contains(topic)
     }

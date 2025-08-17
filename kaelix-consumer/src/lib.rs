@@ -1,6 +1,6 @@
 //! # Kaelix Consumer
 //!
-//! High-performance message consumer client for the MemoryStreamer distributed streaming system.
+//! High-performance message consumer client for the `MemoryStreamer` distributed streaming system.
 //!
 //! This crate provides:
 //! - High-throughput message consumption
@@ -41,17 +41,17 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
-pub mod consumer;
 pub mod config;
-pub mod subscription;
+pub mod consumer;
 pub mod offset;
+pub mod subscription;
 
-pub use consumer::{Consumer, ConsumedMessage};
 pub use config::ConsumerConfig;
+pub use consumer::{ConsumedMessage, Consumer};
 pub use kaelix_core::{Error, Result};
 
 /// Re-export commonly used types
 pub mod prelude {
-    pub use crate::{Consumer, ConsumerConfig, ConsumedMessage};
+    pub use crate::{ConsumedMessage, Consumer, ConsumerConfig};
     pub use kaelix_core::prelude::*;
 }

@@ -11,10 +11,9 @@ pub struct OffsetManager {
 
 impl OffsetManager {
     /// Create a new offset manager.
+    #[must_use]
     pub fn new() -> Self {
-        Self {
-            offsets: HashMap::new(),
-        }
+        Self { offsets: HashMap::new() }
     }
 
     /// Update the offset for a partition.
@@ -23,11 +22,14 @@ impl OffsetManager {
     }
 
     /// Get the current offset for a partition.
+    #[must_use]
     pub fn get_offset(&self, partition: &PartitionId) -> Option<Offset> {
         self.offsets.get(partition).copied()
     }
 
     /// Get all tracked offsets.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn all_offsets(&self) -> &HashMap<PartitionId, Offset> {
         &self.offsets
     }
@@ -38,13 +40,29 @@ impl OffsetManager {
     }
 
     /// Commit all current offsets.
-    pub async fn commit_all(&self) -> Result<()> {
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Connection to broker is lost
+    /// - Broker rejects commit request
+    /// - Network I/O error occurs
+    /// - Consumer group coordination fails
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn commit_all(&self) -> Result<()> {
         // TODO: Implement offset commit to broker
         Ok(())
     }
 
     /// Commit specific offset.
-    pub async fn commit_offset(&self, partition: PartitionId, offset: Offset) -> Result<()> {
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Connection to broker is lost
+    /// - Broker rejects commit request
+    /// - Network I/O error occurs
+    /// - Invalid partition or offset specified
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn commit_offset(&self, _partition: PartitionId, _offset: Offset) -> Result<()> {
         // TODO: Implement single offset commit
         Ok(())
     }

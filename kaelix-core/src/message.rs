@@ -14,16 +14,19 @@ pub struct MessageId(Uuid);
 
 impl MessageId {
     /// Generate a new unique message ID.
+    #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 
     /// Create a message ID from a UUID.
+    #[must_use]
     pub const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
 
     /// Get the underlying UUID.
+    #[must_use]
     pub const fn as_uuid(&self) -> &Uuid {
         &self.0
     }
@@ -57,7 +60,7 @@ impl Topic {
                 message: "Topic name cannot be empty".to_string(),
             });
         }
-        
+
         if name.len() > 255 {
             return Err(crate::Error::InvalidMessage {
                 message: "Topic name cannot exceed 255 characters".to_string(),
@@ -75,11 +78,13 @@ impl Topic {
     }
 
     /// Get the topic name as a string slice.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Convert to owned string.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -102,28 +107,31 @@ impl AsRef<str> for Topic {
 pub struct Message {
     /// Unique message identifier
     pub id: MessageId,
-    
+
     /// Topic for message routing
     pub topic: Topic,
-    
+
     /// Message payload (zero-copy)
     pub payload: Bytes,
-    
+
     /// Message timestamp
     pub timestamp: Timestamp,
-    
+
     /// Optional partition assignment
     pub partition: Option<PartitionId>,
-    
+
     /// Optional message offset
     pub offset: Option<Offset>,
-    
+
     /// Optional message headers
     pub headers: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Message {
     /// Create a new message with the given topic and payload.
+    ///
+    /// # Errors
+    /// Returns an error if the topic name is invalid.
     pub fn new(topic: impl Into<String>, payload: Bytes) -> crate::Result<Self> {
         Ok(Self {
             id: MessageId::new(),
@@ -137,21 +145,25 @@ impl Message {
     }
 
     /// Create a message builder for more complex construction.
+    #[must_use]
     pub fn builder() -> MessageBuilder {
         MessageBuilder::default()
     }
 
     /// Get the payload size in bytes.
-    pub fn payload_size(&self) -> usize {
+    #[must_use]
+    pub const fn payload_size(&self) -> usize {
         self.payload.len()
     }
 
     /// Check if the message has headers.
+    #[must_use]
     pub fn has_headers(&self) -> bool {
-        self.headers.as_ref().map_or(false, |h| !h.is_empty())
+        self.headers.as_ref().is_some_and(|h| !h.is_empty())
     }
 
     /// Get a header value by key.
+    #[must_use]
     pub fn get_header(&self, key: &str) -> Option<&str> {
         self.headers.as_ref()?.get(key).map(String::as_str)
     }
@@ -176,12 +188,14 @@ pub struct MessageBuilder {
 
 impl MessageBuilder {
     /// Set the message ID.
-    pub fn id(mut self, id: MessageId) -> Self {
+    #[must_use]
+    pub const fn id(mut self, id: MessageId) -> Self {
         self.id = Some(id);
         self
     }
 
     /// Set the topic.
+    #[must_use]
     pub fn topic(mut self, topic: impl Into<String>) -> Self {
         if let Ok(topic) = Topic::new(topic) {
             self.topic = Some(topic);
@@ -190,30 +204,35 @@ impl MessageBuilder {
     }
 
     /// Set the payload.
+    #[must_use]
     pub fn payload(mut self, payload: Bytes) -> Self {
         self.payload = Some(payload);
         self
     }
 
     /// Set the timestamp.
-    pub fn timestamp(mut self, timestamp: Timestamp) -> Self {
+    #[must_use]
+    pub const fn timestamp(mut self, timestamp: Timestamp) -> Self {
         self.timestamp = Some(timestamp);
         self
     }
 
     /// Set the partition.
-    pub fn partition(mut self, partition: PartitionId) -> Self {
+    #[must_use]
+    pub const fn partition(mut self, partition: PartitionId) -> Self {
         self.partition = Some(partition);
         self
     }
 
     /// Set the offset.
-    pub fn offset(mut self, offset: Offset) -> Self {
+    #[must_use]
+    pub const fn offset(mut self, offset: Offset) -> Self {
         self.offset = Some(offset);
         self
     }
 
     /// Add a header.
+    #[must_use]
     pub fn header(mut self, key: String, value: String) -> Self {
         self.headers.get_or_insert_with(Default::default).insert(key, value);
         self
@@ -233,7 +252,7 @@ impl MessageBuilder {
         })?;
 
         Ok(Message {
-            id: self.id.unwrap_or_else(MessageId::new),
+            id: self.id.unwrap_or_default(),
             topic,
             payload,
             timestamp: self.timestamp.unwrap_or_else(Utc::now),

@@ -6,7 +6,7 @@ use kaelix_core::{Message, MessageId, Result};
 /// High-performance message publisher client.
 #[derive(Debug)]
 pub struct Publisher {
-    config: PublisherConfig,
+    _config: PublisherConfig,
     // TODO: Add connection pool and other state
 }
 
@@ -21,40 +21,84 @@ pub struct PublishResult {
 
 impl Publisher {
     /// Create a new publisher with the given configuration.
-    pub async fn new(config: PublisherConfig) -> Result<Self> {
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Network connection to broker fails
+    /// - Authentication credentials are invalid
+    /// - Broker is unavailable or unreachable
+    /// - Configuration parameters are invalid
+    /// - Resource allocation fails
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn new(config: PublisherConfig) -> Result<Self> {
         Ok(Self {
-            config,
+            _config: config,
             // TODO: Initialize connections
         })
     }
 
     /// Publish a single message.
-    pub async fn publish(&self, message: Message) -> Result<PublishResult> {
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Connection to broker is lost
+    /// - Message serialization fails
+    /// - Publishing timeout occurs
+    /// - Insufficient permissions for topic
+    /// - Broker rejects the message due to policy violations
+    /// - Network I/O error occurs
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn publish(&self, message: &Message) -> Result<PublishResult> {
         // TODO: Implement message publishing
-        Ok(PublishResult {
-            message_id: message.id,
-            timestamp: chrono::Utc::now(),
-        })
+        Ok(PublishResult { message_id: message.id, timestamp: chrono::Utc::now() })
     }
 
     /// Publish a batch of messages for improved performance.
-    pub async fn publish_batch(&self, messages: Vec<Message>) -> Result<Vec<PublishResult>> {
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Connection to broker is lost
+    /// - One or more messages fail serialization
+    /// - Batch publishing timeout occurs
+    /// - Insufficient permissions for any topic
+    /// - Broker rejects the batch due to size limits
+    /// - Network I/O error occurs during batch transmission
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn publish_batch(&self, messages: &[Message]) -> Result<Vec<PublishResult>> {
         // TODO: Implement batch publishing
         let mut results = Vec::new();
         for message in messages {
-            results.push(self.publish(message).await?);
+            results.push(self.publish(message)?);
         }
         Ok(results)
     }
 
     /// Flush any pending messages.
-    pub async fn flush(&self) -> Result<()> {
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Connection to broker is lost during flush
+    /// - Pending messages fail to transmit
+    /// - Flush timeout occurs
+    /// - I/O error during buffer flush
+    /// - Broker becomes unavailable during operation
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn flush(&self) -> Result<()> {
         // TODO: Implement flush
         Ok(())
     }
 
     /// Close the publisher and clean up resources.
-    pub async fn close(self) -> Result<()> {
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Graceful shutdown fails
+    /// - Pending messages cannot be flushed
+    /// - Connection cleanup encounters errors
+    /// - Resource deallocation fails
+    /// - Shutdown timeout occurs
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn close(self) -> Result<()> {
         // TODO: Implement graceful shutdown
         Ok(())
     }

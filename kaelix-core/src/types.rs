@@ -8,7 +8,7 @@ use std::fmt;
 pub type Timestamp = DateTime<Utc>;
 
 /// Partition identifier for horizontal scaling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct PartitionId(pub u32);
 
 impl fmt::Display for PartitionId {
@@ -23,14 +23,10 @@ impl From<u32> for PartitionId {
     }
 }
 
-impl Default for PartitionId {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-
 /// Message offset within a partition for ordering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub struct Offset(pub u64);
 
 impl fmt::Display for Offset {
@@ -45,24 +41,21 @@ impl From<u64> for Offset {
     }
 }
 
-impl Default for Offset {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-
 impl Offset {
     /// Create a new offset.
+    #[must_use]
     pub const fn new(offset: u64) -> Self {
         Self(offset)
     }
 
     /// Get the next offset.
+    #[must_use]
     pub const fn next(self) -> Self {
         Self(self.0 + 1)
     }
 
     /// Get the raw offset value.
+    #[must_use]
     pub const fn value(self) -> u64 {
         self.0
     }

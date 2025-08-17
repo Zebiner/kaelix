@@ -8,7 +8,8 @@ pub struct ConnectionPool {
 
 impl ConnectionPool {
     /// Create a new connection pool.
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {}
     }
 }

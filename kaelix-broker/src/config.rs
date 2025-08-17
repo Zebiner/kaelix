@@ -6,18 +6,22 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Configuration for the broker instance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BrokerConfig {
     /// Network binding configuration
+    #[serde(default)]
     pub network: NetworkConfig,
-    
+
     /// Storage configuration
+    #[serde(default)]
     pub storage: StorageConfig,
-    
+
     /// Performance tuning parameters
+    #[serde(default)]
     pub performance: PerformanceConfig,
-    
+
     /// Security settings
+    #[serde(default)]
     pub security: SecurityConfig,
 }
 
@@ -26,13 +30,13 @@ pub struct BrokerConfig {
 pub struct NetworkConfig {
     /// Address to bind for client connections
     pub bind_address: SocketAddr,
-    
+
     /// Maximum number of concurrent connections
     pub max_connections: usize,
-    
+
     /// Connection timeout
     pub connection_timeout: Duration,
-    
+
     /// Enable TLS
     pub tls_enabled: bool,
 }
@@ -42,13 +46,13 @@ pub struct NetworkConfig {
 pub struct StorageConfig {
     /// Data directory for persistent storage
     pub data_dir: PathBuf,
-    
+
     /// Maximum log file size
     pub max_log_size: u64,
-    
+
     /// Log retention period
     pub retention_period: Duration,
-    
+
     /// Enable compression
     pub compression_enabled: bool,
 }
@@ -58,39 +62,31 @@ pub struct StorageConfig {
 pub struct PerformanceConfig {
     /// Number of worker threads
     pub worker_threads: usize,
-    
+
     /// Message batch size for processing
     pub batch_size: usize,
-    
+
     /// Buffer sizes for various queues
     pub buffer_size: usize,
-    
+
     /// Enable memory-mapped files
     pub mmap_enabled: bool,
 }
 
 /// Security configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SecurityConfig {
     /// Enable authentication
+    #[serde(default)]
     pub auth_enabled: bool,
-    
-    /// TLS certificate path
-    pub tls_cert_path: Option<PathBuf>,
-    
-    /// TLS private key path
-    pub tls_key_path: Option<PathBuf>,
-}
 
-impl Default for BrokerConfig {
-    fn default() -> Self {
-        Self {
-            network: NetworkConfig::default(),
-            storage: StorageConfig::default(),
-            performance: PerformanceConfig::default(),
-            security: SecurityConfig::default(),
-        }
-    }
+    /// TLS certificate path
+    #[serde(default)]
+    pub tls_cert_path: Option<PathBuf>,
+
+    /// TLS private key path
+    #[serde(default)]
+    pub tls_key_path: Option<PathBuf>,
 }
 
 impl Default for NetworkConfig {
@@ -122,16 +118,6 @@ impl Default for PerformanceConfig {
             batch_size: 1000,
             buffer_size: 65536,
             mmap_enabled: true,
-        }
-    }
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            auth_enabled: false,
-            tls_cert_path: None,
-            tls_key_path: None,
         }
     }
 }
