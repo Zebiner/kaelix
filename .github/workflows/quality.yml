@@ -486,7 +486,7 @@ jobs:
         fi
     
     - name: Store benchmark artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: benchmark-results
@@ -579,7 +579,7 @@ jobs:
           -W clippy::expect_used
     
     - name: Upload security artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: security-analysis
@@ -661,7 +661,7 @@ jobs:
         echo "Quality report generated successfully"
     
     - name: Upload quality artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: quality-report

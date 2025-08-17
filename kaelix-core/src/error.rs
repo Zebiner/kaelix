@@ -26,6 +26,14 @@ pub enum Error {
         message: String,
     },
 
+    /// Network-related errors
+    #[error("Network error: {0}")]
+    NetworkError(String),
+
+    /// Configuration errors
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
     /// Resource limits exceeded
     #[error("Resource limit exceeded: {resource} ({limit})")]
     ResourceLimit {
@@ -35,7 +43,7 @@ pub enum Error {
         limit: String,
     },
 
-    /// Configuration errors
+    /// Configuration errors (legacy format - kept for compatibility)
     #[error("Configuration error: {message}")]
     Configuration {
         /// Error message describing the configuration issue
@@ -62,5 +70,11 @@ impl From<serde_json::Error> for Error {
 impl From<bincode::Error> for Error {
     fn from(err: bincode::Error) -> Self {
         Self::Serialization { message: err.to_string() }
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Self::NetworkError(err.to_string())
     }
 }

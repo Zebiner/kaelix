@@ -25,6 +25,7 @@ async-trait = { workspace = true }
 # Networking
 quinn = { workspace = true }
 rustls = { workspace = true }
+socket2 = { workspace = true }
 
 # Data handling
 serde = { workspace = true }

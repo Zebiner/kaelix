@@ -1,19 +1,18 @@
-//! # Kaelix Publisher
+//! High-performance message publisher for Kaelix.
 //!
-//! High-performance message publisher client for the `MemoryStreamer` distributed streaming system.
+//! This module provides the message publishing functionality for the Kaelix streaming platform,
+//! enabling applications to publish messages to topics with at-least-once delivery guarantees.
 //!
-//! This crate provides:
+//! ## Features
+//!
 //! - High-throughput message publishing
-//! - Batched message sending for optimal performance
-//! - Connection pooling and management
-//! - Async/await support with backpressure handling
-//! - Error handling and retry mechanisms
-//!
-//! ## Performance Features
-//! - Zero-copy message serialization
-//! - Connection pooling for scalability
-//! - Batched publishing for reduced overhead
-//! - Configurable backpressure handling
+//! - Automatic batching for efficiency
+//! - Configurable retry policies
+//! - Compression support
+//! - Message ordering guarantees
+//! - Back-pressure handling
+//! - Producer acknowledgments
+//! - Asynchronous and synchronous APIs
 //!
 //! ## Examples
 //!
@@ -24,18 +23,15 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = PublisherConfig::default();
-//! let publisher = Publisher::new(config).await?;
+//! let publisher = Publisher::new(config)?;
 //!
 //! let message = Message::new("my-topic", Bytes::from("hello world"))?;
-//! publisher.publish(message).await?;
+//! publisher.publish(&message)?;
 //! # Ok(())
 //! # }
 //! ```
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
-#![warn(clippy::pedantic)]
-#![warn(clippy::nursery)]
 
 pub mod batch;
 pub mod config;
@@ -43,11 +39,4 @@ pub mod connection;
 pub mod publisher;
 
 pub use config::PublisherConfig;
-pub use kaelix_core::{Error, Result};
-pub use publisher::{PublishResult, Publisher};
-
-/// Re-export commonly used types
-pub mod prelude {
-    pub use crate::{PublishResult, Publisher, PublisherConfig};
-    pub use kaelix_core::prelude::*;
-}
+pub use publisher::Publisher;

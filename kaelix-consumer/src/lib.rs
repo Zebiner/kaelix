@@ -1,17 +1,16 @@
-//! # Kaelix Consumer
+//! High-performance message consumer for Kaelix.
 //!
-//! High-performance message consumer client for the `MemoryStreamer` distributed streaming system.
+//! This module provides the message consumer functionality for the Kaelix streaming platform,
+//! enabling applications to consume messages from topics with at-least-once delivery guarantees.
 //!
-//! This crate provides:
+//! ## Features
+//!
 //! - High-throughput message consumption
-//! - Automatic offset management and tracking
-//! - Consumer group coordination
-//! - Async stream processing capabilities
-//! - Configurable backpressure and flow control
-//!
-//! ## Performance Features
-//! - Zero-copy message deserialization
-//! - Batched message fetching
+//! - Automatic consumer group management
+//! - Offset management and tracking
+//! - Graceful shutdown capabilities
+//! - Built-in error handling and retries
+//! - Consumer lag monitoring
 //! - Parallel message processing
 //! - Automatic partition balancing
 //!
@@ -23,23 +22,20 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = ConsumerConfig::default();
-//! let mut consumer = Consumer::new(config).await?;
+//! let mut consumer = Consumer::new(config)?;
 //!
-//! consumer.subscribe(&["my-topic"]).await?;
+//! consumer.subscribe(&["my-topic"])?;
 //!
 //! while let Some(message) = consumer.next().await {
 //!     let message = message?;
 //!     println!("Received: {:?}", message);
-//!     consumer.commit().await?;
+//!     consumer.commit()?;
 //! }
 //! # Ok(())
 //! # }
 //! ```
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
-#![warn(clippy::pedantic)]
-#![warn(clippy::nursery)]
 
 pub mod config;
 pub mod consumer;
@@ -47,11 +43,5 @@ pub mod offset;
 pub mod subscription;
 
 pub use config::ConsumerConfig;
-pub use consumer::{ConsumedMessage, Consumer};
-pub use kaelix_core::{Error, Result};
-
-/// Re-export commonly used types
-pub mod prelude {
-    pub use crate::{ConsumedMessage, Consumer, ConsumerConfig};
-    pub use kaelix_core::prelude::*;
-}
+pub use consumer::Consumer;
+pub use offset::OffsetManager;

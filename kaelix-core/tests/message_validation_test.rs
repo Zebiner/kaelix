@@ -28,6 +28,24 @@ impl Message {
                 .as_secs(),
         })
     }
+
+    /// Get the topic
+    #[must_use]
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    /// Get the payload
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Get the timestamp
+    #[must_use]
+    pub const fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
 }
 
 #[cfg(test)]
@@ -38,6 +56,11 @@ mod tests {
     fn test_message_creation_success() {
         let msg = Message::new("test_topic".to_string(), vec![1, 2, 3, 4]);
         assert!(msg.is_ok());
+
+        let msg = msg.unwrap();
+        assert_eq!(msg.topic(), "test_topic");
+        assert_eq!(msg.payload(), &[1, 2, 3, 4]);
+        assert!(msg.timestamp() > 0);
     }
 
     #[test]
