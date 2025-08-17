@@ -3,101 +3,6 @@
 
 [build]
 # Use all available CPU cores for compilation
-jobs = 0
-
-# Incremental compilation for faster development builds
-incremental = true
-
-# Use the faster linker when available
-[target.x86_64-unknown-linux-gnu]
-linker = "clang"
-rustflags = [
-    # Enable all CPU features for maximum SIMD performance
-    "-C", "target-cpu=native",
-    
-    # Link-time optimization for production builds
-    "-C", "lto=thin",
-    
-    # Optimize for performance over compile time
-    "-C", "opt-level=3",
-    
-    # Enable overflow checks in release mode for security
-    "-C", "overflow-checks=on",
-    
-    # Reduce binary size while maintaining performance
-    "-C", "strip=symbols",
-    
-    # Enable vectorization and loop optimizations
-    "-C", "target-feature=+avx2,+fma,+sse4.2",
-    
-    # Memory safety and security hardening
-    "-C", "control-flow-guard=on",
-    "-Z", "sanitizer=address",  # Only for debug builds
-    
-    # Faster memory allocation with jemalloc
-    "-C", "link-args=-ljemalloc",
-]
-
-# Alternative target for development builds (faster compilation)
-[target.x86_64-unknown-linux-gnu.dev]
-rustflags = [
-    "-C", "target-cpu=native",
-    "-C", "opt-level=1",  # Faster compilation
-    "-C", "debuginfo=2",  # Full debug info
-    "-C", "overflow-checks=on",
-    "-C", "target-feature=+avx2,+sse4.2",
-]
-
-# Profile-specific build configurations
-[profile.dev]
-# Development profile optimized for fast iteration
-opt-level = 1          # Some optimization for better performance testing
-debug = true           # Full debug information
-debug-assertions = true
-overflow-checks = true
-lto = false           # Disable LTO for faster builds
-panic = 'unwind'      # Better debugging
-incremental = true
-codegen-units = 256   # Parallel compilation
-
-[profile.release]
-# Production profile optimized for maximum performance
-opt-level = 3         # Maximum optimization
-debug = false         # No debug info for smaller binaries
-debug-assertions = false
-overflow-checks = true  # Keep for security
-lto = "fat"          # Full LTO for maximum performance
-panic = 'abort'      # Smaller binary, faster execution
-codegen-units = 1    # Better optimization at cost of compile time
-strip = true         # Remove symbols for smaller binary
-
-[profile.bench]
-# Benchmarking profile for accurate performance measurements
-inherits = "release"
-debug = true         # Keep debug info for profiling
-lto = "thin"        # Balance between optimization and compile time
-
-[profile.test]
-# Testing profile optimized for fast test execution
-opt-level = 2        # Good performance for integration tests
-debug = true
-overflow-checks = true
-incremental = true
-
-# Custom profiles for specific use cases
-[profile.perf]
-# Ultra-optimized profile for performance critical deployments
-inherits = "release"
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = 'abort'
-
-[profile.dev-fast]
-# Fast development builds with minimal optimization
-inherits = "dev"
-opt-level = 0
-debug = true
 incremental = true
 
 # Cargo aliases for common development workflows
@@ -106,90 +11,35 @@ incremental = true
 check-all = "check --all-targets --all-features"
 fmt-check = "fmt --all -- --check"
 clippy-all = "clippy --all-targets --all-features -- -D warnings"
-quality = ["fmt", "clippy-all", "check-all"]
 
 # Testing workflows
 test-all = "test --all-features --all-targets"
 test-unit = "test --lib"
 test-integration = "test --test '*'"
 test-bench = "bench --all-features"
-test-coverage = "tarpaulin --all-features --out Html --output-dir coverage"
 
 # Performance workflows
 bench-throughput = "bench --bench throughput -- --nocapture"
 bench-latency = "bench --bench latency -- --nocapture"
 bench-all = "bench --all-features -- --nocapture"
-perf-build = "build --profile perf --all-features"
 
 # Development shortcuts
-dev-fast = "build --profile dev-fast"
 dev-check = ["fmt", "clippy", "test-unit"]
-full-check = ["fmt", "clippy-all", "test-all", "bench-all"]
 
 # Release workflows
 release-build = "build --release --all-features"
-release-check = ["quality", "test-all", "release-build"]
-
-# Specialized builds
-ebpf-build = "build --features ebpf --profile perf"
-dpdk-build = "build --features dpdk --profile perf"
-security-build = "build --features full-security --profile perf"
 
 # Documentation
 docs = "doc --all-features --no-deps --open"
-docs-private = "doc --all-features --document-private-items --no-deps --open"
 
 # Environment variables for build optimization
 [env]
 # Use jemalloc as the global allocator for better performance
 MALLOC_CONF = "background_thread:true,metadata_thp:auto,dirty_decay_ms:30000,muzzy_decay_ms:30000"
 
-# Rust compiler optimizations
-RUSTFLAGS = "-C target-cpu=native"
-
-# Cargo build optimizations
-CARGO_BUILD_JOBS = "0"  # Use all available cores
-CARGO_INCREMENTAL = "1"
-
 # Performance monitoring
 RUST_BACKTRACE = "1"
 RUST_LOG = "info"
-
-# Memory allocator selection (jemalloc for production)
-MEMORY_ALLOCATOR = "jemalloc"
-
-# SIMD and vectorization
-CARGO_CFG_TARGET_FEATURE = "avx2,fma,sse4.2"
-
-# Security settings
-RUSTC_FORCE_INCREMENTAL = "1"
-RUST_SECURE_COMPILATION = "1"
-
-# Feature flags for conditional compilation
-[unstable]
-# Enable unstable features for performance
-build-std = ["std", "panic_abort"]  # Build std library with optimizations
-build-std-features = ["panic_immediate_abort"]
-
-# Timing information for build analysis
-timings = ["info", "json"]
-
-# Dependency resolution optimization
-resolver = "2"
-
-# Custom registries for internal dependencies
-[registries]
-# Add custom registry for MemoryStreamer internal crates if needed
-# memorystreamer = { index = "https://internal.example.com/git/index" }
-
-# Source replacement for faster dependency resolution
-[source]
-# Replace crates.io with a mirror for faster downloads (optional)
-# [source.crates-io]
-# replace-with = "mirror"
-# 
-# [source.mirror]
-# registry = "https://mirror.example.com/crates.io-index"
 
 # Git dependencies optimization
 [net]
@@ -203,21 +53,8 @@ multiplexing = true
 low-speed-limit = 10
 check-revoke = false  # Faster for development
 
-# Registry settings
-[registry]
-global-credential-providers = ["cargo:token"]
-
-# Workspace settings
-[workspace]
-# Dependency resolution for the entire workspace
-resolver = "2"
-
 # Configuration for specific tools
 [term]
 color = "always"
 progress.when = "auto"
 progress.width = 80
-
-# Future incompatibility warnings
-[future-incompat-report]
-frequency = "always"

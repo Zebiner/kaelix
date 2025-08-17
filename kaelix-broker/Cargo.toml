@@ -1,0 +1,58 @@
+[package]
+name = "kaelix-broker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Message broker implementation for MemoryStreamer"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# Internal dependencies
+kaelix-core = { path = "../kaelix-core" }
+
+# Core async runtime
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Networking
+quinn = { workspace = true }
+rustls = { workspace = true }
+
+# Data handling
+serde = { workspace = true }
+bytes = { workspace = true }
+smallvec = { workspace = true }
+
+# Concurrency and performance
+crossbeam = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+flume = { workspace = true }
+num_cpus = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+metrics = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+test-case = { workspace = true }
+rstest = { workspace = true }
+mockall = { workspace = true }
+tokio-test = "0.4"

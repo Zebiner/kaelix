@@ -1,0 +1,150 @@
+[workspace]
+resolver = "2"
+members = [
+    "kaelix-core",
+    "kaelix-broker", 
+    "kaelix-publisher",
+    "kaelix-consumer",
+    "kaelix-tests",
+    "kaelix-benches",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88.0"
+authors = ["MemoryStreamer Team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/memorystreamer/kaelix"
+homepage = "https://github.com/memorystreamer/kaelix"
+documentation = "https://docs.rs/kaelix"
+description = "Ultra-high-performance distributed streaming system"
+keywords = ["streaming", "messaging", "performance", "async", "distributed"]
+categories = ["network-programming", "asynchronous", "data-structures"]
+
+[workspace.dependencies]
+# Core runtime and async
+tokio = { version = "1.47", features = ["full"] }
+tokio-util = "0.7"
+tokio-test = "0.4"
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization and data handling
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+bytes = "1.7"
+smallvec = { version = "1.13", features = ["serde"] }
+
+# Performance and concurrency
+crossbeam = "0.8"
+crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
+parking_lot = "0.12"
+rayon = "1.10"
+dashmap = "6.0"
+flume = "0.11"
+num_cpus = "1.16"
+
+# Networking
+quinn = "0.11"
+rustls = "0.23"
+
+# Observability and metrics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+
+# Error handling and utilities
+thiserror = "1.0"
+anyhow = "1.0"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Security and cryptography
+ring = "0.17"
+zeroize = { version = "1.8", features = ["derive"] }
+subtle = "2.6"
+rand = "0.8"
+
+# Testing dependencies
+proptest = "1.6"
+criterion = { version = "0.5", features = ["html_reports"] }
+quickcheck = "1.0"
+arbitrary = { version = "1.3", features = ["derive"] }
+test-case = "3.1"
+rstest = "0.21"
+mockall = "0.13"
+wiremock = "0.6"
+fake = { version = "2.9", features = ["derive"] }
+
+# Performance profiling
+pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
+dhat = "0.3"
+
+# Security testing
+cargo-fuzz = "0.12"
+afl = "0.15"
+honggfuzz = "0.5"
+
+# Benchmarking utilities  
+iai-callgrind = "0.11"
+codspeed-criterion-compat = "2.7"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+# Deny performance and correctness lints
+all = "deny"
+pedantic = "deny"
+nursery = "deny"
+cargo = "deny"
+
+# Allow some pedantic lints that can be overly restrictive
+module_name_repetitions = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+
+# Specifically target performance
+inefficient_to_string = "deny"
+large_enum_variant = "deny"
+needless_pass_by_value = "deny"
+trivially_copy_pass_by_ref = "deny"
+unnecessary_wraps = "deny"
+
+[profile.release]
+opt-level = 3
+debug = false
+strip = true
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+strip = false
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+[profile.test]
+opt-level = 1
+
+# Profile for fuzzing
+[profile.fuzz]
+inherits = "dev"
+opt-level = 1
+overflow-checks = false

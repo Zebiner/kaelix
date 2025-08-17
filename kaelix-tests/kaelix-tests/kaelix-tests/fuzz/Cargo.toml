@@ -1,0 +1,13 @@
+[package]
+name = "kaelix-fuzz"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kaelix-tests = { path = ".." }
+arbitrary = "1.3"
+
+[[bin]]
+name = "protocol_fuzzer"
+path = "src/protocol_fuzzer.rs"

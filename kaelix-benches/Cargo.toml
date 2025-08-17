@@ -1,0 +1,112 @@
+[package]
+name = "kaelix-benches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Performance benchmarks for MemoryStreamer"
+keywords.workspace = true
+categories.workspace = true
+
+# Comprehensive benchmark suite for MemoryStreamer
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bench]]
+name = "latency"
+harness = false
+
+[[bench]]
+name = "memory"
+harness = false
+
+[[bench]]
+name = "concurrent"
+harness = false
+
+[[bench]]
+name = "stress"
+harness = false
+
+[[bench]]
+name = "baseline"
+harness = false
+
+# Legacy benchmarks (to be migrated)
+[[bench]]
+name = "message_throughput"
+harness = false
+
+[[bench]]
+name = "latency_benchmark"
+harness = false
+
+[dependencies]
+# Internal dependencies
+kaelix-core = { path = "../kaelix-core" }
+kaelix-broker = { path = "../kaelix-broker" }
+kaelix-publisher = { path = "../kaelix-publisher" }
+kaelix-consumer = { path = "../kaelix-consumer" }
+kaelix-tests = { path = "../kaelix-tests" }
+
+# Benchmarking (required)
+criterion = { workspace = true }
+
+# Profiling (optional)
+iai-callgrind = { workspace = true, optional = true }
+pprof = { workspace = true, optional = true }
+dhat = { workspace = true, optional = true }
+codspeed-criterion-compat = { workspace = true, optional = true }
+
+# Core async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Data handling and serialization
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+smallvec = { workspace = true }
+
+# Performance and concurrency
+crossbeam = { workspace = true }
+crossbeam-channel = { workspace = true }
+crossbeam-queue = { workspace = true }
+parking_lot = { workspace = true }
+rayon = { workspace = true }
+dashmap = { workspace = true }
+flume = { workspace = true }
+num_cpus = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Random generation for test data
+rand = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+
+[features]
+default = []
+profiling = ["dep:pprof", "dep:dhat", "dep:iai-callgrind", "dep:codspeed-criterion-compat"]
+pprof = ["dep:pprof"]
+dhat = ["dep:dhat"]
+iai = ["dep:iai-callgrind"]
+codspeed = ["dep:codspeed-criterion-compat"]
+flamegraph = ["pprof", "pprof/flamegraph"]
+detailed-profiling = ["dep:pprof", "dep:dhat", "dep:iai-callgrind"]
