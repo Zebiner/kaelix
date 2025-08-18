@@ -34,6 +34,10 @@ pub enum Error {
     #[error("Configuration error: {0}")]
     ConfigError(String),
 
+    /// Runtime-related errors
+    #[error("Runtime error: {0}")]
+    Runtime(String),
+
     /// Resource limits exceeded
     #[error("Resource limit exceeded: {resource} ({limit})")]
     ResourceLimit {

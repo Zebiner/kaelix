@@ -26,9 +26,26 @@ bincode = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 smallvec = { workspace = true }
 
-# Concurrency
+# Configuration management
+toml = "0.8"
+validator = { version = "0.18", features = ["derive"] }
+notify = "6.1"
+dirs = "5.0"
+num_cpus = "1.16"
+
+# Concurrency and performance
 crossbeam = { workspace = true }
+crossbeam-channel = { workspace = true }
+crossbeam-queue = { workspace = true }
+crossbeam-utils = { workspace = true }
 parking_lot = { workspace = true }
+
+# High-performance data structures for multiplexing
+dashmap = "6.1"
+lru = "0.12"
+
+# Runtime and system integration
+libc = "0.2"
 
 # Error handling
 thiserror = { workspace = true }
@@ -37,15 +54,54 @@ anyhow = { workspace = true }
 # Utilities
 uuid = { workspace = true }
 chrono = { workspace = true }
+semver = { version = "1.0", features = ["serde"] }
 
-# Observability
+# Observability and telemetry
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-opentelemetry = "0.21"
+
+# High-performance metrics
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
+# OpenTelemetry integration
+opentelemetry = "0.20"
+opentelemetry-jaeger = "0.19"
+opentelemetry-prometheus = "0.13"
+
+# HTTP client for metrics export
+reqwest = { version = "0.11", features = ["json"] }
+
+# Time and duration handling
+time = "0.3"
+
+# SIMD optimizations
+wide = "0.7"
+
+# Hex encoding for trace/span IDs
+hex = "0.4"
+
+# Random number generation for sampling
+rand = { workspace = true }
 
 # Security
 zeroize = { workspace = true }
+
+# Plugin system
+libloading = { version = "0.8", optional = true }
+
+[features]
+default = ["telemetry", "multiplexing"]
+telemetry = []
+multiplexing = []
+plugin-dynamic-loading = ["libloading"]
+high-performance = ["telemetry", "multiplexing"]
 
 [dev-dependencies]
 proptest = { workspace = true }
 test-case = { workspace = true }
 rstest = { workspace = true }
 tokio-test = "0.4"
+tempfile = "3.8"
+criterion = { workspace = true }

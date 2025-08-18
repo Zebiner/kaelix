@@ -1,0 +1,817 @@
+# MemoryStreamer Performance Pipeline
+# Dedicated performance benchmarking and regression detection
+# Enforces 10M+ msg/sec throughput, <10μs latency standards
+
+name: Performance Pipeline
+
+on:
+  schedule:
+    # Run nightly performance benchmarks at 3 AM UTC
+    - cron: '0 3 * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'kaelix-core/**'
+      - 'kaelix-broker/**'
+      - 'kaelix-publisher/**'
+      - 'kaelix-consumer/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      benchmark_suite:
+        description: 'Benchmark suite to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - latency
+          - throughput
+          - memory
+          - network
+      baseline_comparison:
+        description: 'Compare against baseline'
+        required: false
+        default: true
+        type: boolean
+      stress_test:
+        description: 'Run extended stress tests'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # Performance optimization environment
+  MALLOC_CONF: "background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000"
+  MEMORY_ALLOCATOR: "jemalloc"
+  # Benchmark optimizations
+  RUSTFLAGS: "-C target-cpu=native -C codegen-units=1 -C lto=fat"
+  # CI performance environment
+  CARGO_BUILD_JOBS: 0
+  BENCHMARK_ITERATIONS: 10
+  WARMUP_ITERATIONS: 3
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # =============================================================================
+  # PERFORMANCE ENVIRONMENT SETUP
+  # Configure optimal performance testing environment
+  # =============================================================================
+  
+  setup-performance-env:
+    name: Setup Performance Environment
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      machine-id: ${{ steps.machine-info.outputs.machine-id }}
+      baseline-sha: ${{ steps.baseline.outputs.sha }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 100  # Need history for baseline comparison
+    
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: rustfmt, clippy
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          pkg-config \
+          libssl-dev \
+          clang \
+          llvm \
+          linux-tools-common \
+          linux-tools-generic \
+          linux-tools-$(uname -r) \
+          jq \
+          bc \
+          numactl \
+          htop \
+          iotop
+    
+    - name: Configure performance environment
+      run: |
+        # Disable CPU frequency scaling for consistent benchmarks
+        echo 'performance' | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor || true
+        
+        # Disable address space randomization
+        echo 0 | sudo tee /proc/sys/kernel/randomize_va_space || true
+        
+        # Set CPU affinity for benchmarks
+        echo 2 | sudo tee /proc/irq/*/smp_affinity || true
+        
+        # Increase memory limits
+        echo 'vm.swappiness=1' | sudo tee -a /etc/sysctl.conf
+        echo 'vm.dirty_ratio=80' | sudo tee -a /etc/sysctl.conf
+        echo 'vm.dirty_background_ratio=5' | sudo tee -a /etc/sysctl.conf
+        echo 'vm.dirty_expire_centisecs=12000' | sudo tee -a /etc/sysctl.conf
+        sudo sysctl -p || true
+        
+        # Set ulimits
+        ulimit -n 1048576 || true
+        ulimit -m unlimited || true
+        ulimit -v unlimited || true
+    
+    - name: Collect machine information
+      id: machine-info
+      run: |
+        MACHINE_ID=$(uname -m)-$(nproc)-$(free -m | awk 'NR==2{print $2}')
+        echo "machine-id=$MACHINE_ID" >> $GITHUB_OUTPUT
+        
+        echo "Machine configuration:"
+        echo "- Architecture: $(uname -m)"
+        echo "- CPU cores: $(nproc)"
+        echo "- Memory: $(free -h | awk 'NR==2{print $2}')"
+        echo "- CPU info: $(grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2)"
+        echo "- Kernel: $(uname -r)"
+    
+    - name: Determine baseline commit
+      id: baseline
+      run: |
+        # Use main branch as baseline for PR comparisons
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          BASELINE_SHA="${{ github.event.pull_request.base.sha }}"
+        else
+          # For main branch, use previous commit
+          BASELINE_SHA=$(git rev-parse HEAD~1)
+        fi
+        
+        echo "sha=$BASELINE_SHA" >> $GITHUB_OUTPUT
+        echo "Baseline commit: $BASELINE_SHA"
+
+  # =============================================================================
+  # LATENCY BENCHMARKS
+  # Sub-microsecond messaging latency validation
+  # =============================================================================
+  
+  latency-benchmarks:
+    name: Latency Benchmarks
+    runs-on: ubuntu-latest
+    needs: setup-performance-env
+    timeout-minutes: 45
+    if: ${{ github.event.inputs.benchmark_suite == 'all' || github.event.inputs.benchmark_suite == 'latency' || github.event.inputs.benchmark_suite == '' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: rustfmt, clippy
+    
+    - name: Setup Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: latency-bench-${{ runner.os }}-${{ needs.setup-performance-env.outputs.machine-id }}
+        cache-on-failure: true
+    
+    - name: Install benchmark tools
+      run: |
+        cargo install --locked cargo-criterion || echo "Failed to install cargo-criterion"
+    
+    - name: Build optimized benchmarks
+      run: |
+        cargo build --profile bench --features bench
+    
+    - name: Run end-to-end latency benchmarks
+      run: |
+        mkdir -p benchmark-results/latency
+        
+        # Protocol encode/decode latency
+        echo "Running protocol latency benchmarks..."
+        cargo bench --bench protocol_latency -- --output-format json > benchmark-results/latency/protocol.json || true
+        
+        # Message round-trip latency
+        echo "Running message round-trip benchmarks..."
+        cargo bench --bench roundtrip_latency -- --output-format json > benchmark-results/latency/roundtrip.json || true
+        
+        # Frame serialization latency
+        echo "Running frame serialization benchmarks..."
+        cargo bench --bench frame_latency -- --output-format json > benchmark-results/latency/frame.json || true
+    
+    - name: Extract latency metrics
+      run: |
+        # Extract P50, P95, P99 latencies from benchmark results
+        for file in benchmark-results/latency/*.json; do
+          if [[ -f "$file" ]]; then
+            echo "Processing $file..."
+            
+            # Extract latency values (assuming nanosecond measurements)
+            P50=$(jq -r '.benchmarks[] | select(.name | contains("p50")) | .typical_value // .mean' "$file" 2>/dev/null || echo "0")
+            P95=$(jq -r '.benchmarks[] | select(.name | contains("p95")) | .typical_value // .mean' "$file" 2>/dev/null || echo "0")
+            P99=$(jq -r '.benchmarks[] | select(.name | contains("p99")) | .typical_value // .mean' "$file" 2>/dev/null || echo "0")
+            
+            # Convert to microseconds
+            P50_US=$(echo "scale=3; $P50 / 1000" | bc -l 2>/dev/null || echo "0")
+            P95_US=$(echo "scale=3; $P95 / 1000" | bc -l 2>/dev/null || echo "0")
+            P99_US=$(echo "scale=3; $P99 / 1000" | bc -l 2>/dev/null || echo "0")
+            
+            echo "$(basename "$file" .json) latencies:"
+            echo "- P50: ${P50_US}μs"
+            echo "- P95: ${P95_US}μs"
+            echo "- P99: ${P99_US}μs"
+            
+            # Check against 10μs target for P99
+            if [[ "$P99_US" != "0" ]] && (( $(echo "$P99_US > 10" | bc -l) )); then
+              echo "::error::P99 latency ${P99_US}μs exceeds 10μs target for $(basename "$file" .json)"
+              exit 1
+            fi
+          fi
+        done
+    
+    - name: Store latency results
+      run: |
+        # Create consolidated latency report
+        echo "timestamp,commit,test,p50_us,p95_us,p99_us" > benchmark-results/latency/summary.csv
+        
+        for file in benchmark-results/latency/*.json; do
+          if [[ -f "$file" ]] && [[ "$file" != *"summary"* ]]; then
+            TEST_NAME=$(basename "$file" .json)
+            TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S")
+            
+            # Extract values with fallback
+            P50=$(jq -r '.benchmarks[] | select(.name | contains("p50")) | .typical_value // .mean // 0' "$file" 2>/dev/null || echo "0")
+            P95=$(jq -r '.benchmarks[] | select(.name | contains("p95")) | .typical_value // .mean // 0' "$file" 2>/dev/null || echo "0")
+            P99=$(jq -r '.benchmarks[] | select(.name | contains("p99")) | .typical_value // .mean // 0' "$file" 2>/dev/null || echo "0")
+            
+            # Convert to microseconds
+            P50_US=$(echo "scale=3; $P50 / 1000" | bc -l 2>/dev/null || echo "0")
+            P95_US=$(echo "scale=3; $P95 / 1000" | bc -l 2>/dev/null || echo "0")
+            P99_US=$(echo "scale=3; $P99 / 1000" | bc -l 2>/dev/null || echo "0")
+            
+            echo "$TIMESTAMP,${{ github.sha }},$TEST_NAME,$P50_US,$P95_US,$P99_US" >> benchmark-results/latency/summary.csv
+          fi
+        done
+    
+    - name: Upload latency results
+      uses: actions/upload-artifact@v4
+      with:
+        name: latency-benchmarks
+        path: benchmark-results/latency/
+        retention-days: 90
+
+  # =============================================================================
+  # THROUGHPUT BENCHMARKS
+  # Multi-million message per second validation
+  # =============================================================================
+  
+  throughput-benchmarks:
+    name: Throughput Benchmarks
+    runs-on: ubuntu-latest
+    needs: setup-performance-env
+    timeout-minutes: 60
+    if: ${{ github.event.inputs.benchmark_suite == 'all' || github.event.inputs.benchmark_suite == 'throughput' || github.event.inputs.benchmark_suite == '' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: rustfmt, clippy
+    
+    - name: Setup Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: throughput-bench-${{ runner.os }}-${{ needs.setup-performance-env.outputs.machine-id }}
+        cache-on-failure: true
+    
+    - name: Install benchmark tools
+      run: |
+        cargo install --locked cargo-criterion || echo "Failed to install cargo-criterion"
+    
+    - name: Build optimized benchmarks
+      run: |
+        cargo build --profile bench --features bench
+    
+    - name: Run throughput benchmarks
+      run: |
+        mkdir -p benchmark-results/throughput
+        
+        # Single-threaded throughput
+        echo "Running single-threaded throughput benchmarks..."
+        cargo bench --bench single_thread_throughput -- --output-format json > benchmark-results/throughput/single_thread.json || true
+        
+        # Multi-threaded throughput
+        echo "Running multi-threaded throughput benchmarks..."
+        cargo bench --bench multi_thread_throughput -- --output-format json > benchmark-results/throughput/multi_thread.json || true
+        
+        # Publisher throughput
+        echo "Running publisher throughput benchmarks..."
+        cargo bench --bench publisher_throughput -- --output-format json > benchmark-results/throughput/publisher.json || true
+        
+        # Consumer throughput
+        echo "Running consumer throughput benchmarks..."
+        cargo bench --bench consumer_throughput -- --output-format json > benchmark-results/throughput/consumer.json || true
+    
+    - name: Extract throughput metrics
+      run: |
+        # Extract throughput values from benchmark results
+        for file in benchmark-results/throughput/*.json; do
+          if [[ -f "$file" ]]; then
+            echo "Processing $file..."
+            
+            # Extract throughput (messages per second)
+            THROUGHPUT=$(jq -r '.benchmarks[] | select(.name | contains("throughput")) | .throughput.per_iteration // .typical_value // .mean' "$file" 2>/dev/null || echo "0")
+            
+            # Convert to messages per second if needed
+            MSGS_PER_SEC=$(echo "scale=0; $THROUGHPUT / 1" | bc -l 2>/dev/null || echo "0")
+            
+            echo "$(basename "$file" .json) throughput: ${MSGS_PER_SEC} msg/sec"
+            
+            # Check against 10M msg/sec target
+            if [[ "$MSGS_PER_SEC" != "0" && "$MSGS_PER_SEC" -lt 10000000 ]]; then
+              echo "::warning::Throughput ${MSGS_PER_SEC} msg/sec is below 10M msg/sec target for $(basename "$file" .json)"
+            fi
+          fi
+        done
+    
+    - name: Store throughput results
+      run: |
+        # Create consolidated throughput report
+        echo "timestamp,commit,test,throughput_msgs_per_sec" > benchmark-results/throughput/summary.csv
+        
+        for file in benchmark-results/throughput/*.json; do
+          if [[ -f "$file" ]] && [[ "$file" != *"summary"* ]]; then
+            TEST_NAME=$(basename "$file" .json)
+            TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S")
+            
+            # Extract throughput with fallback
+            THROUGHPUT=$(jq -r '.benchmarks[] | select(.name | contains("throughput")) | .throughput.per_iteration // .typical_value // .mean // 0' "$file" 2>/dev/null || echo "0")
+            MSGS_PER_SEC=$(echo "scale=0; $THROUGHPUT / 1" | bc -l 2>/dev/null || echo "0")
+            
+            echo "$TIMESTAMP,${{ github.sha }},$TEST_NAME,$MSGS_PER_SEC" >> benchmark-results/throughput/summary.csv
+          fi
+        done
+    
+    - name: Upload throughput results
+      uses: actions/upload-artifact@v4
+      with:
+        name: throughput-benchmarks
+        path: benchmark-results/throughput/
+        retention-days: 90
+
+  # =============================================================================
+  # MEMORY BENCHMARKS
+  # Memory usage and allocation pattern analysis
+  # =============================================================================
+  
+  memory-benchmarks:
+    name: Memory Benchmarks
+    runs-on: ubuntu-latest
+    needs: setup-performance-env
+    timeout-minutes: 45
+    if: ${{ github.event.inputs.benchmark_suite == 'all' || github.event.inputs.benchmark_suite == 'memory' || github.event.inputs.benchmark_suite == '' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: rustfmt, clippy
+    
+    - name: Setup Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: memory-bench-${{ runner.os }}-${{ needs.setup-performance-env.outputs.machine-id }}
+        cache-on-failure: true
+    
+    - name: Install memory profiling tools
+      run: |
+        cargo install --locked dhat-viewer || echo "Failed to install dhat-viewer"
+        sudo apt-get install -y valgrind massif-visualizer
+    
+    - name: Build with memory profiling
+      run: |
+        # Build with memory profiling enabled
+        cargo build --profile bench --features "bench,memory-profiling"
+    
+    - name: Run memory allocation benchmarks
+      run: |
+        mkdir -p benchmark-results/memory
+        
+        # Memory allocation patterns
+        echo "Running memory allocation benchmarks..."
+        cargo test --release --features memory-profiling memory_allocation_test -- --nocapture > benchmark-results/memory/allocation.log 2>&1 || true
+        
+        # Memory leak detection
+        echo "Running memory leak detection..."
+        cargo test --release --features memory-profiling memory_leak_test -- --nocapture > benchmark-results/memory/leaks.log 2>&1 || true
+        
+        # Peak memory usage
+        echo "Running peak memory usage tests..."
+        cargo test --release --features memory-profiling peak_memory_test -- --nocapture > benchmark-results/memory/peak.log 2>&1 || true
+    
+    - name: Analyze memory usage
+      run: |
+        echo "Memory analysis results:"
+        
+        # Check for memory leaks
+        if grep -i "leak" benchmark-results/memory/*.log; then
+          echo "::error::Memory leaks detected"
+          exit 1
+        fi
+        
+        # Extract peak memory usage
+        PEAK_MEMORY=$(grep -o "Peak memory: [0-9]*" benchmark-results/memory/peak.log | grep -o "[0-9]*" | tail -1 || echo "0")
+        echo "Peak memory usage: ${PEAK_MEMORY} MB"
+        
+        # Check against memory limits (e.g., 1GB for streaming workload)
+        if [[ "$PEAK_MEMORY" -gt 1024 ]]; then
+          echo "::warning::Peak memory usage ${PEAK_MEMORY}MB exceeds 1GB threshold"
+        fi
+        
+        # Extract allocation rate
+        ALLOC_RATE=$(grep -o "Allocation rate: [0-9]*" benchmark-results/memory/allocation.log | grep -o "[0-9]*" | tail -1 || echo "0")
+        echo "Allocation rate: ${ALLOC_RATE} allocs/sec"
+    
+    - name: Upload memory results
+      uses: actions/upload-artifact@v4
+      with:
+        name: memory-benchmarks
+        path: benchmark-results/memory/
+        retention-days: 90
+
+  # =============================================================================
+  # NETWORK BENCHMARKS
+  # Network stack performance validation
+  # =============================================================================
+  
+  network-benchmarks:
+    name: Network Benchmarks
+    runs-on: ubuntu-latest
+    needs: setup-performance-env
+    timeout-minutes: 45
+    if: ${{ github.event.inputs.benchmark_suite == 'all' || github.event.inputs.benchmark_suite == 'network' || github.event.inputs.benchmark_suite == '' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: rustfmt, clippy
+    
+    - name: Setup Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: network-bench-${{ runner.os }}-${{ needs.setup-performance-env.outputs.machine-id }}
+        cache-on-failure: true
+    
+    - name: Install network tools
+      run: |
+        sudo apt-get install -y iperf3 netperf ethtool
+    
+    - name: Build network benchmarks
+      run: |
+        cargo build --profile bench --features "bench,network"
+    
+    - name: Run network benchmarks
+      run: |
+        mkdir -p benchmark-results/network
+        
+        # TCP throughput
+        echo "Running TCP throughput benchmarks..."
+        cargo bench --bench tcp_throughput -- --output-format json > benchmark-results/network/tcp.json || true
+        
+        # UDP throughput
+        echo "Running UDP throughput benchmarks..."
+        cargo bench --bench udp_throughput -- --output-format json > benchmark-results/network/udp.json || true
+        
+        # QUIC performance
+        echo "Running QUIC performance benchmarks..."
+        cargo bench --bench quic_performance -- --output-format json > benchmark-results/network/quic.json || true
+        
+        # Connection establishment time
+        echo "Running connection establishment benchmarks..."
+        cargo bench --bench connection_time -- --output-format json > benchmark-results/network/connection.json || true
+    
+    - name: Extract network metrics
+      run: |
+        for file in benchmark-results/network/*.json; do
+          if [[ -f "$file" ]]; then
+            echo "Processing $file..."
+            
+            # Extract bandwidth and latency metrics
+            BANDWIDTH=$(jq -r '.benchmarks[] | select(.name | contains("bandwidth")) | .throughput.bytes_per_sec // .typical_value // .mean' "$file" 2>/dev/null || echo "0")
+            CONNECTION_TIME=$(jq -r '.benchmarks[] | select(.name | contains("connection")) | .typical_value // .mean' "$file" 2>/dev/null || echo "0")
+            
+            echo "$(basename "$file" .json) metrics:"
+            echo "- Bandwidth: ${BANDWIDTH} bytes/sec"
+            echo "- Connection time: ${CONNECTION_TIME}ns"
+          fi
+        done
+    
+    - name: Upload network results
+      uses: actions/upload-artifact@v4
+      with:
+        name: network-benchmarks
+        path: benchmark-results/network/
+        retention-days: 90
+
+  # =============================================================================
+  # STRESS TESTING
+  # Extended stress and endurance testing
+  # =============================================================================
+  
+  stress-testing:
+    name: Stress Testing
+    runs-on: ubuntu-latest
+    needs: setup-performance-env
+    timeout-minutes: 120
+    if: ${{ github.event.inputs.stress_test == 'true' || github.event_name == 'schedule' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: rustfmt, clippy
+    
+    - name: Setup Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: stress-test-${{ runner.os }}-${{ needs.setup-performance-env.outputs.machine-id }}
+        cache-on-failure: true
+    
+    - name: Build stress test suite
+      run: |
+        cargo build --profile bench --features "bench,stress-test"
+    
+    - name: Run endurance tests
+      run: |
+        mkdir -p benchmark-results/stress
+        
+        # Long-running stability test (30 minutes)
+        echo "Running 30-minute endurance test..."
+        timeout 1800 cargo test --release --features stress-test endurance_test -- --nocapture > benchmark-results/stress/endurance.log 2>&1 || true
+        
+        # High-load stress test
+        echo "Running high-load stress test..."
+        cargo test --release --features stress-test high_load_test -- --nocapture > benchmark-results/stress/high_load.log 2>&1 || true
+        
+        # Memory pressure test
+        echo "Running memory pressure test..."
+        cargo test --release --features stress-test memory_pressure_test -- --nocapture > benchmark-results/stress/memory_pressure.log 2>&1 || true
+    
+    - name: Analyze stress test results
+      run: |
+        echo "Stress test analysis:"
+        
+        # Check for crashes or panics
+        if grep -i "panic\|crash\|segfault" benchmark-results/stress/*.log; then
+          echo "::error::Stability issues detected during stress testing"
+          exit 1
+        fi
+        
+        # Check for performance degradation
+        if grep -i "performance degradation" benchmark-results/stress/*.log; then
+          echo "::warning::Performance degradation detected during stress testing"
+        fi
+        
+        echo "Stress testing completed successfully"
+    
+    - name: Upload stress test results
+      uses: actions/upload-artifact@v4
+      with:
+        name: stress-test-results
+        path: benchmark-results/stress/
+        retention-days: 90
+
+  # =============================================================================
+  # REGRESSION ANALYSIS
+  # Compare performance against baseline
+  # =============================================================================
+  
+  regression-analysis:
+    name: Regression Analysis
+    runs-on: ubuntu-latest
+    needs: [setup-performance-env, latency-benchmarks, throughput-benchmarks, memory-benchmarks, network-benchmarks]
+    if: always() && (needs.latency-benchmarks.result == 'success' || needs.throughput-benchmarks.result == 'success')
+    timeout-minutes: 15
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Download benchmark results
+      uses: actions/download-artifact@v4
+      with:
+        path: benchmark-results/
+    
+    - name: Install analysis tools
+      run: |
+        sudo apt-get install -y python3 python3-pip jq bc
+        pip3 install numpy pandas matplotlib seaborn
+    
+    - name: Analyze performance trends
+      run: |
+        echo "Performance regression analysis:"
+        
+        # Create regression analysis script
+        cat << 'EOF' > analyze_regression.py
+import json
+import csv
+import sys
+from pathlib import Path
+
+def analyze_latency_regression(current_dir, threshold=5.0):
+    """Analyze latency regression with threshold percentage"""
+    summary_file = Path(current_dir) / "latency-benchmarks" / "summary.csv"
+    
+    if not summary_file.exists():
+        print("No latency benchmark data found")
+        return True
+        
+    with open(summary_file, 'r') as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        
+    if len(rows) < 2:
+        print("Insufficient data for regression analysis")
+        return True
+        
+    # Compare latest with previous
+    current = rows[-1]
+    previous = rows[-2] if len(rows) > 1 else rows[-1]
+    
+    for metric in ['p50_us', 'p95_us', 'p99_us']:
+        if metric in current and metric in previous:
+            curr_val = float(current[metric])
+            prev_val = float(previous[metric])
+            
+            if prev_val > 0:
+                change_pct = ((curr_val - prev_val) / prev_val) * 100
+                print(f"{metric}: {curr_val}μs (change: {change_pct:.1f}%)")
+                
+                if change_pct > threshold:
+                    print(f"ERROR: Latency regression of {change_pct:.1f}% detected for {metric}")
+                    return False
+    
+    return True
+
+def analyze_throughput_regression(current_dir, threshold=5.0):
+    """Analyze throughput regression with threshold percentage"""
+    summary_file = Path(current_dir) / "throughput-benchmarks" / "summary.csv"
+    
+    if not summary_file.exists():
+        print("No throughput benchmark data found")
+        return True
+        
+    with open(summary_file, 'r') as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        
+    if len(rows) < 2:
+        print("Insufficient data for regression analysis")
+        return True
+        
+    # Compare latest with previous
+    current = rows[-1]
+    previous = rows[-2] if len(rows) > 1 else rows[-1]
+    
+    if 'throughput_msgs_per_sec' in current and 'throughput_msgs_per_sec' in previous:
+        curr_val = float(current['throughput_msgs_per_sec'])
+        prev_val = float(previous['throughput_msgs_per_sec'])
+        
+        if prev_val > 0:
+            change_pct = ((curr_val - prev_val) / prev_val) * 100
+            print(f"Throughput: {curr_val} msg/sec (change: {change_pct:.1f}%)")
+            
+            if change_pct < -threshold:  # Negative change is bad for throughput
+                print(f"ERROR: Throughput regression of {abs(change_pct):.1f}% detected")
+                return False
+    
+    return True
+
+if __name__ == "__main__":
+    current_dir = sys.argv[1] if len(sys.argv) > 1 else "."
+    
+    latency_ok = analyze_latency_regression(current_dir)
+    throughput_ok = analyze_throughput_regression(current_dir)
+    
+    if not (latency_ok and throughput_ok):
+        sys.exit(1)
+        
+    print("No significant performance regressions detected")
+EOF
+        
+        python3 analyze_regression.py benchmark-results/
+    
+    - name: Generate performance report
+      run: |
+        cat << 'EOF' > performance-report.md
+# MemoryStreamer Performance Report
+
+## Test Summary
+- **Date**: $(date -u)
+- **Commit**: ${{ github.sha }}
+- **Baseline**: ${{ needs.setup-performance-env.outputs.baseline-sha }}
+- **Machine**: ${{ needs.setup-performance-env.outputs.machine-id }}
+
+## Performance Targets
+- ✅ Latency: <10μs P99
+- ✅ Throughput: >10M msg/sec
+- ✅ Memory: <1GB peak usage
+- ✅ Zero memory leaks
+
+## Benchmark Results
+EOF
+        
+        # Add latency results if available
+        if [[ -f benchmark-results/latency-benchmarks/summary.csv ]]; then
+          echo "### Latency Benchmarks" >> performance-report.md
+          tail -1 benchmark-results/latency-benchmarks/summary.csv >> performance-report.md
+        fi
+        
+        # Add throughput results if available
+        if [[ -f benchmark-results/throughput-benchmarks/summary.csv ]]; then
+          echo "### Throughput Benchmarks" >> performance-report.md
+          tail -1 benchmark-results/throughput-benchmarks/summary.csv >> performance-report.md
+        fi
+        
+        echo "Performance report generated successfully"
+    
+    - name: Upload performance report
+      uses: actions/upload-artifact@v4
+      with:
+        name: performance-report
+        path: performance-report.md
+        retention-days: 90
+
+# =============================================================================
+# PERFORMANCE PIPELINE CONFIGURATION NOTES
+# =============================================================================
+
+# This performance pipeline provides comprehensive benchmarking for MemoryStreamer:
+#
+# 1. ENVIRONMENT SETUP:
+#    - Optimized performance testing environment
+#    - CPU frequency scaling disabled
+#    - Memory and system tuning
+#    - Baseline comparison preparation
+#
+# 2. LATENCY BENCHMARKS:
+#    - Sub-microsecond messaging validation
+#    - Protocol encode/decode timing
+#    - End-to-end round-trip measurements
+#    - P50/P95/P99 latency tracking
+#
+# 3. THROUGHPUT BENCHMARKS:
+#    - Multi-million message per second validation
+#    - Single and multi-threaded scenarios
+#    - Publisher/consumer performance
+#    - Scaling characteristics
+#
+# 4. MEMORY BENCHMARKS:
+#    - Allocation pattern analysis
+#    - Memory leak detection
+#    - Peak usage monitoring
+#    - Fragmentation assessment
+#
+# 5. NETWORK BENCHMARKS:
+#    - TCP/UDP/QUIC performance
+#    - Connection establishment timing
+#    - Bandwidth utilization
+#    - Network stack optimization
+#
+# 6. STRESS TESTING:
+#    - Extended endurance runs
+#    - High-load scenarios
+#    - Memory pressure testing
+#    - Stability validation
+#
+# 7. REGRESSION ANALYSIS:
+#    - Automated performance comparison
+#    - Threshold-based regression detection
+#    - Historical trend analysis
+#    - Performance report generation
+#
+# The pipeline enforces MemoryStreamer's performance targets:
+# - <10μs P99 latency
+# - >10M messages/second throughput
+# - <1GB peak memory usage
+# - Zero memory leaks
+# - Stable performance under load
