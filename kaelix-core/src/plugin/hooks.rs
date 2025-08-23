@@ -7,8 +7,8 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Hook points in the message processing pipeline.
@@ -468,7 +468,7 @@ impl HookManager {
                             );
                             break;
                         }
-                    }
+                    },
                     Err(error) => {
                         let hook_duration = hook_start.elapsed();
                         self.metrics.record_execution(hook_duration, false);
@@ -485,7 +485,7 @@ impl HookManager {
                             hook_point: hook_point.name().to_string(),
                             reason: error.to_string(),
                         });
-                    }
+                    },
                 }
             }
         }
@@ -503,10 +503,7 @@ impl HookManager {
 
     /// Get the number of hooks registered at a hook point.
     pub fn hook_count(&self, hook_point: &HookPoint) -> usize {
-        self.hooks
-            .get(hook_point)
-            .map(|hooks| hooks.len())
-            .unwrap_or(0)
+        self.hooks.get(hook_point).map(|hooks| hooks.len()).unwrap_or(0)
     }
 
     /// Get the total number of registered hooks.
@@ -525,18 +522,12 @@ impl HookManager {
 
     /// Get hooks registered by a specific plugin.
     pub fn plugin_hook_count(&self, plugin_id: PluginId) -> usize {
-        self.plugin_hooks
-            .get(&plugin_id)
-            .map(|hooks| hooks.len())
-            .unwrap_or(0)
+        self.plugin_hooks.get(&plugin_id).map(|hooks| hooks.len()).unwrap_or(0)
     }
 
     /// Get detailed hook information for monitoring.
     pub fn hook_details(&self, hook_point: &HookPoint) -> Vec<HookRegistration> {
-        self.hooks
-            .get(hook_point)
-            .map(|hooks| hooks.clone())
-            .unwrap_or_default()
+        self.hooks.get(hook_point).map(|hooks| hooks.clone()).unwrap_or_default()
     }
 
     /// Check if any hooks are registered at a hook point.
@@ -619,9 +610,13 @@ impl Clone for HookManagerMetrics {
     fn clone(&self) -> Self {
         Self {
             total_registrations: AtomicU64::new(self.total_registrations.load(Ordering::Relaxed)),
-            total_unregistrations: AtomicU64::new(self.total_unregistrations.load(Ordering::Relaxed)),
+            total_unregistrations: AtomicU64::new(
+                self.total_unregistrations.load(Ordering::Relaxed),
+            ),
             total_executions: AtomicU64::new(self.total_executions.load(Ordering::Relaxed)),
-            successful_executions: AtomicU64::new(self.successful_executions.load(Ordering::Relaxed)),
+            successful_executions: AtomicU64::new(
+                self.successful_executions.load(Ordering::Relaxed),
+            ),
             failed_executions: AtomicU64::new(self.failed_executions.load(Ordering::Relaxed)),
             avg_execution_time: self.avg_execution_time.clone(),
             created_at: self.created_at,
@@ -656,7 +651,7 @@ impl HookManagerMetrics {
     /// Record hook execution.
     fn record_execution(&self, duration: Duration, success: bool) {
         self.total_executions.fetch_add(1, Ordering::Relaxed);
-        
+
         if success {
             self.successful_executions.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -685,7 +680,7 @@ impl HookManagerMetrics {
     pub fn execution_success_rate(&self) -> f64 {
         let total = self.total_executions();
         let successful = self.successful_executions.load(Ordering::Relaxed);
-        
+
         if total > 0 {
             (successful as f64 / total as f64) * 100.0
         } else {
@@ -792,12 +787,8 @@ mod tests {
 
         let plugin_id = PluginId::new();
         let hook = Arc::new(TestHook);
-        let registration = HookRegistration::new(
-            plugin_id,
-            HookPoint::PreProcessing,
-            HookPriority::NORMAL,
-            hook,
-        );
+        let registration =
+            HookRegistration::new(plugin_id, HookPoint::PreProcessing, HookPriority::NORMAL, hook);
 
         assert_eq!(registration.plugin_id, plugin_id);
         assert_eq!(registration.hook_point, HookPoint::PreProcessing);
@@ -855,12 +846,8 @@ mod tests {
         let plugin_id = PluginId::new();
         let hook = Arc::new(TestHook);
 
-        let registration = HookRegistration::new(
-            plugin_id,
-            HookPoint::PreProcessing,
-            HookPriority::NORMAL,
-            hook,
-        );
+        let registration =
+            HookRegistration::new(plugin_id, HookPoint::PreProcessing, HookPriority::NORMAL, hook);
 
         manager.register_hook(registration).await.unwrap();
 
@@ -896,12 +883,8 @@ mod tests {
         let plugin_id = PluginId::new();
 
         // Register multiple hooks with different priorities
-        let high_prio_hook = Arc::new(TestHook {
-            result: HookResult::Continue,
-        });
-        let low_prio_hook = Arc::new(TestHook {
-            result: HookResult::Continue,
-        });
+        let high_prio_hook = Arc::new(TestHook { result: HookResult::Continue });
+        let low_prio_hook = Arc::new(TestHook { result: HookResult::Continue });
 
         let high_registration = HookRegistration::new(
             plugin_id,

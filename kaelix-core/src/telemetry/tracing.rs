@@ -1,216 +1,412 @@
 //! # Distributed Tracing System
 //!
-//! OpenTelemetry-compatible distributed tracing with minimal overhead
-//! designed for <5% performance impact when enabled at 1% sampling.
+//! High-performance distributed tracing with OpenTelemetry compatibility.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use crate::telemetry::config::SamplingStrategy;
+use crate::telemetry::{Result, TelemetryError, TracingConfig};
 use dashmap::DashMap;
-use smallvec::SmallVec;
-use tokio::sync::{mpsc, oneshot};
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
-use crate::telemetry::{TelemetryError, Result, TracingConfig};
+/// Unique identifier for traces
+pub type TraceId = u128;
 
-/// Distributed tracing system with minimal overhead
+/// Unique identifier for spans
+pub type SpanId = u64;
+
+/// High-performance distributed tracing system
 pub struct TracingSystem {
+    /// System configuration
+    config: TracingConfig,
+
     /// Active trace contexts
     active_traces: DashMap<TraceId, Arc<TraceContext>>,
-    
-    /// Span processor for async span handling
-    span_processor: Arc<SpanProcessor>,
-    
-    /// Trace sampler for controlling overhead
-    sampler: Arc<dyn TraceSampler>,
-    
-    /// Context propagator for distributed tracing
-    context_propagator: Arc<ContextPropagator>,
-    
-    /// Configuration
-    config: TracingConfig,
-    
-    /// Performance metrics
+
+    /// Span buffer for batch export
+    span_buffer: Arc<Mutex<SpanBuffer>>,
+
+    /// System metrics
     metrics: TracingMetrics,
-    
-    /// Span buffer for batched export
-    span_buffer: Arc<SpanBuffer>,
-    
-    /// Background task handle
-    processor_handle: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+
+    /// Sampling state
+    sampler: Arc<dyn Sampler + Send + Sync>,
+
+    /// Export state
+    export_enabled: AtomicBool,
+}
+
+/// Trace context containing span hierarchy
+#[derive(Debug)]
+pub struct TraceContext {
+    /// Trace identifier
+    pub trace_id: TraceId,
+
+    /// Root span of the trace
+    pub root_span: Arc<Span>,
+
+    /// All spans in this trace
+    pub spans: RwLock<HashMap<SpanId, Arc<Span>>>,
+
+    /// Trace creation timestamp
+    pub created_at: Instant,
+
+    /// Trace completion status
+    pub completed: AtomicBool,
+}
+
+/// Individual span within a trace
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Span {
+    /// Span identifier
+    pub span_id: SpanId,
+
+    /// Parent span identifier (None for root spans)
+    pub parent_span_id: Option<SpanId>,
+
+    /// Trace this span belongs to
+    pub trace_id: TraceId,
+
+    /// Operation name
+    pub operation_name: String,
+
+    /// Span start time
+    pub start_time: SystemTime,
+
+    /// Span end time (None if active)
+    pub end_time: Option<SystemTime>,
+
+    /// Span tags/attributes
+    pub tags: HashMap<String, String>,
+
+    /// Span logs/events
+    pub logs: Vec<SpanLog>,
+
+    /// Span status
+    pub status: SpanStatus,
+}
+
+/// Span log entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpanLog {
+    /// Log timestamp
+    pub timestamp: SystemTime,
+
+    /// Log message
+    pub message: String,
+
+    /// Log level
+    pub level: String,
+
+    /// Additional fields
+    pub fields: HashMap<String, String>,
+}
+
+/// Span completion status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SpanStatus {
+    /// Span is still active
+    Active,
+
+    /// Span completed successfully
+    Ok,
+
+    /// Span completed with error
+    Error { message: String },
+
+    /// Span was cancelled
+    Cancelled,
+
+    /// Span timed out
+    Timeout,
+}
+
+/// Sampling decision for traces
+pub trait Sampler {
+    /// Decide whether to sample a trace
+    fn sample(&self, trace_id: TraceId, operation_name: &str) -> bool;
+
+    /// Get current sampling rate (0.0 to 1.0)
+    fn sampling_rate(&self) -> f64;
+}
+
+/// Always-on sampler (samples all traces)
+pub struct AlwaysOnSampler;
+
+impl Sampler for AlwaysOnSampler {
+    fn sample(&self, _trace_id: TraceId, _operation_name: &str) -> bool {
+        true
+    }
+
+    fn sampling_rate(&self) -> f64 {
+        1.0
+    }
+}
+
+/// Always-off sampler (samples no traces)
+pub struct AlwaysOffSampler;
+
+impl Sampler for AlwaysOffSampler {
+    fn sample(&self, _trace_id: TraceId, _operation_name: &str) -> bool {
+        false
+    }
+
+    fn sampling_rate(&self) -> f64 {
+        0.0
+    }
+}
+
+/// Percentage-based sampler
+pub struct PercentageSampler {
+    rate: f64,
+}
+
+impl PercentageSampler {
+    pub fn new(rate: f64) -> Self {
+        Self { rate: rate.clamp(0.0, 1.0) }
+    }
+}
+
+impl Sampler for PercentageSampler {
+    fn sample(&self, trace_id: TraceId, _operation_name: &str) -> bool {
+        // Use trace ID for deterministic sampling
+        let hash = (trace_id as f64) / (u128::MAX as f64);
+        hash < self.rate
+    }
+
+    fn sampling_rate(&self) -> f64 {
+        self.rate
+    }
+}
+
+/// Buffered spans for batch export
+struct SpanBuffer {
+    /// Buffered spans
+    spans: Vec<Arc<Span>>,
+
+    /// Buffer capacity
+    capacity: usize,
+
+    /// Total bytes used
+    bytes_used: usize,
+}
+
+impl SpanBuffer {
+    fn new(capacity: usize) -> Self {
+        Self { spans: Vec::with_capacity(capacity), capacity, bytes_used: 0 }
+    }
+
+    fn push(&mut self, span: Arc<Span>) -> bool {
+        if self.spans.len() < self.capacity {
+            // Rough estimate of span size
+            self.bytes_used +=
+                std::mem::size_of::<Span>() + span.operation_name.len() + span.tags.len() * 64; // Rough estimate
+
+            self.spans.push(span);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn drain(&mut self) -> Vec<Arc<Span>> {
+        let spans = std::mem::take(&mut self.spans);
+        self.bytes_used = 0;
+        spans
+    }
+
+    fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.spans.len()
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.bytes_used
+    }
+}
+
+/// Tracing system metrics
+#[derive(Debug, Default)]
+pub struct TracingMetrics {
+    /// Number of traces started
+    pub traces_started: AtomicU64,
+
+    /// Number of traces completed
+    pub traces_completed: AtomicU64,
+
+    /// Number of spans started
+    pub spans_started: AtomicU64,
+
+    /// Number of spans completed
+    pub spans_completed: AtomicU64,
+
+    /// Number of spans sampled
+    pub spans_sampled: AtomicU64,
+
+    /// Number of spans exported
+    pub spans_exported: AtomicU64,
+
+    /// Number of export failures
+    pub export_failures: AtomicU64,
+
+    /// Current active traces
+    pub active_traces: AtomicUsize,
+
+    /// Current active spans
+    pub active_spans: AtomicUsize,
 }
 
 impl TracingSystem {
-    /// Creates a new tracing system
-    pub async fn new(config: TracingConfig) -> Result<Self> {
-        let span_buffer = Arc::new(SpanBuffer::new(config.buffer.max_spans));
-        let span_processor = Arc::new(SpanProcessor::new(
-            config.clone(),
-            Arc::clone(&span_buffer),
-        ));
-        
-        let sampler: Arc<dyn TraceSampler> = match config.sampling_rate {
-            rate if rate >= 1.0 => Arc::new(AlwaysSampler),
-            rate if rate <= 0.0 => Arc::new(NeverSampler),
-            rate => Arc::new(ProbabilitySampler::new(rate)),
-        };
-        
+    /// Create a new tracing system
+    pub fn new(config: TracingConfig) -> Result<Self> {
+        let sampler = Self::create_sampler(&config.sampling_strategy)?;
+
         Ok(Self {
+            config: config.clone(),
             active_traces: DashMap::new(),
-            span_processor,
+            span_buffer: Arc::new(Mutex::new(SpanBuffer::new(config.batch_size))),
+            metrics: TracingMetrics::default(),
             sampler,
-            context_propagator: Arc::new(ContextPropagator::new()),
-            config,
-            metrics: TracingMetrics::new(),
-            span_buffer,
-            processor_handle: parking_lot::Mutex::new(None),
+            export_enabled: AtomicBool::new(false),
         })
     }
 
-    /// Starts a new span with optional parent context
-    ///
-    /// # Performance
-    /// Target: <1μs for span creation when not sampled
-    /// Target: <10μs for span creation when sampled
-    #[inline]
-    pub fn start_span(&self, name: &str, parent: Option<TraceContext>) -> Span {
-        let (trace_id, parent_span_id) = match parent {
-            Some(ref ctx) => (ctx.trace_id, Some(ctx.span_id)),
-            None => (TraceId::generate(), None),
+    /// Create sampler from configuration
+    fn create_sampler(strategy: &SamplingStrategy) -> Result<Arc<dyn Sampler + Send + Sync>> {
+        let sampler: Arc<dyn Sampler + Send + Sync> = match strategy {
+            SamplingStrategy::AlwaysOn => Arc::new(AlwaysOnSampler),
+            SamplingStrategy::AlwaysOff => Arc::new(AlwaysOffSampler),
+            SamplingStrategy::Percentage(rate) => Arc::new(PercentageSampler::new(*rate)),
+            SamplingStrategy::RateLimit(_) => {
+                // TODO: Implement rate-limited sampler
+                Arc::new(PercentageSampler::new(0.1))
+            },
+            SamplingStrategy::Adaptive => {
+                // TODO: Implement adaptive sampler
+                Arc::new(PercentageSampler::new(0.1))
+            },
         };
 
-        let span_id = SpanId::generate();
-        let start_time = Instant::now();
-        
+        Ok(sampler)
+    }
+
+    /// Start a new trace
+    pub fn start_trace(&self, operation_name: String) -> Result<Arc<TraceContext>> {
+        let trace_id = self.generate_trace_id();
+
         // Check sampling decision
-        let sampling_decision = self.sampler.should_sample(&SamplingInput {
+        if !self.sampler.sample(trace_id, &operation_name) {
+            return Err(TelemetryError::tracing("Trace not sampled".to_string()));
+        }
+
+        let root_span = Arc::new(Span {
+            span_id: self.generate_span_id(),
+            parent_span_id: None,
             trace_id,
-            span_id,
-            parent_span_id,
-            name,
-            kind: SpanKind::Internal,
-            attributes: &[],
+            operation_name,
+            start_time: SystemTime::now(),
+            end_time: None,
+            tags: HashMap::new(),
+            logs: Vec::new(),
+            status: SpanStatus::Active,
         });
 
-        let context = TraceContext {
+        let trace_context = Arc::new(TraceContext {
             trace_id,
-            span_id,
-            parent_span_id,
-            sampling_decision,
-            baggage: HashMap::new(),
-        };
+            root_span: root_span.clone(),
+            spans: RwLock::new(HashMap::new()),
+            created_at: Instant::now(),
+            completed: AtomicBool::new(false),
+        });
 
-        // Create span
-        let span = Span {
-            context: context.clone(),
-            name: name.to_string(),
-            start_time,
-            end_time: None,
-            status: SpanStatus::Unset,
-            kind: SpanKind::Internal,
-            attributes: SmallVec::new(),
-            events: SmallVec::new(),
-            links: SmallVec::new(),
-        };
+        // Add root span to trace
+        trace_context.spans.write().insert(root_span.span_id, root_span);
 
-        // Store active trace context if sampled
-        if sampling_decision.is_sampled() {
-            let trace_context = Arc::new(context);
-            self.active_traces.insert(trace_id, trace_context);
-        }
+        // Register trace
+        self.active_traces.insert(trace_id, trace_context.clone());
 
         // Update metrics
+        self.metrics.traces_started.fetch_add(1, Ordering::Relaxed);
         self.metrics.spans_started.fetch_add(1, Ordering::Relaxed);
-        if sampling_decision.is_sampled() {
-            self.metrics.spans_sampled.fetch_add(1, Ordering::Relaxed);
-        }
+        self.metrics.spans_sampled.fetch_add(1, Ordering::Relaxed);
+        self.metrics.active_traces.fetch_add(1, Ordering::Relaxed);
+        self.metrics.active_spans.fetch_add(1, Ordering::Relaxed);
 
-        span
+        Ok(trace_context)
     }
 
-    /// Ends a span and submits it for processing
-    #[inline]
-    pub fn end_span(&self, mut span: Span) {
-        span.end_time = Some(Instant::now());
-        
-        // Only process sampled spans
-        if span.context.sampling_decision.is_sampled() {
-            // Remove from active traces
-            self.active_traces.remove(&span.context.trace_id);
-            
-            // Submit to span processor
-            if let Err(e) = self.span_processor.process_span(span) {
-                self.metrics.processing_errors.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("Failed to process span: {}", e);
+    /// Finish a trace
+    pub fn finish_trace(&self, trace_id: TraceId) -> Result<()> {
+        if let Some((_, trace_context)) = self.active_traces.remove(&trace_id) {
+            trace_context.completed.store(true, Ordering::Release);
+
+            // Export all spans in the trace
+            let spans = trace_context.spans.read();
+            for span in spans.values() {
+                self.export_span(span.clone())?;
             }
+
+            // Update metrics
+            self.metrics.traces_completed.fetch_add(1, Ordering::Relaxed);
+            self.metrics.active_traces.fetch_sub(1, Ordering::Relaxed);
+
+            Ok(())
+        } else {
+            Err(TelemetryError::tracing(format!("Trace not found: {}", trace_id)))
         }
-
-        self.metrics.spans_ended.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Propagates trace context to outgoing headers
-    pub fn propagate_context(&self, context: &TraceContext, headers: &mut HashMap<String, String>) {
-        self.context_propagator.inject(context, headers);
-    }
-
-    /// Extracts trace context from incoming headers
-    pub fn extract_context(&self, headers: &HashMap<String, String>) -> Option<TraceContext> {
-        self.context_propagator.extract(headers)
-    }
-
-    /// Returns the number of active traces
-    pub fn active_traces_count(&self) -> usize {
-        self.active_traces.len()
-    }
-
-    /// Starts the background span processor
-    pub async fn start_span_processor(&self) -> Result<()> {
-        let processor = Arc::clone(&self.span_processor);
-        let config = self.config.clone();
-        
-        let handle = tokio::spawn(async move {
-            processor.run_background_processing(config).await;
-        });
-
-        *self.processor_handle.lock() = Some(handle);
-        Ok(())
-    }
-
-    /// Stops the background span processor
-    pub async fn stop_span_processor(&self) -> Result<()> {
-        if let Some(handle) = self.processor_handle.lock().take() {
-            handle.abort();
-            let _ = handle.await;
+    /// Export a span to the buffer
+    fn export_span(&self, span: Arc<Span>) -> Result<()> {
+        let mut buffer = self.span_buffer.lock();
+        if buffer.push(span) {
+            self.metrics.spans_exported.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        } else {
+            self.metrics.export_failures.fetch_add(1, Ordering::Relaxed);
+            Err(TelemetryError::tracing("Span buffer full".to_string()))
         }
-        Ok(())
     }
 
-    /// Flushes all pending spans
-    pub async fn flush_spans(&self) -> Result<()> {
-        self.span_processor.flush().await
+    /// Generate a unique trace ID
+    fn generate_trace_id(&self) -> TraceId {
+        Uuid::new_v4().as_u128()
     }
 
-    /// Returns current tracing metrics
+    /// Generate a unique span ID
+    fn generate_span_id(&self) -> SpanId {
+        Uuid::new_v4().as_u128() as u64
+    }
+
+    /// Get current metrics snapshot
     pub fn metrics(&self) -> TracingMetricsSnapshot {
         TracingMetricsSnapshot {
+            traces_started: self.metrics.traces_started.load(Ordering::Relaxed),
+            traces_completed: self.metrics.traces_completed.load(Ordering::Relaxed),
             spans_started: self.metrics.spans_started.load(Ordering::Relaxed),
-            spans_ended: self.metrics.spans_ended.load(Ordering::Relaxed),
+            spans_completed: self.metrics.spans_completed.load(Ordering::Relaxed),
             spans_sampled: self.metrics.spans_sampled.load(Ordering::Relaxed),
-            spans_dropped: self.metrics.spans_dropped.load(Ordering::Relaxed),
-            processing_errors: self.metrics.processing_errors.load(Ordering::Relaxed),
-            active_traces: self.active_traces.len(),
-            buffer_size: self.span_buffer.size(),
-            buffer_capacity: self.span_buffer.capacity(),
+            spans_exported: self.metrics.spans_exported.load(Ordering::Relaxed),
+            export_failures: self.metrics.export_failures.load(Ordering::Relaxed),
+            active_traces: self.metrics.active_traces.load(Ordering::Relaxed),
+            active_spans: self.metrics.active_spans.load(Ordering::Relaxed),
         }
     }
 
-    /// Returns estimated memory usage
+    /// Get memory usage estimation
     pub fn memory_usage(&self) -> usize {
         let base_size = std::mem::size_of::<Self>();
-        let traces_size = self.active_traces.len() * std::mem::size_of::<(TraceId, Arc<TraceContext>)>();
-        let buffer_size = self.span_buffer.memory_usage();
-        
+        let traces_size =
+            self.active_traces.len() * std::mem::size_of::<(TraceId, Arc<TraceContext>)>();
+        let buffer_size = self.span_buffer.lock().memory_usage();
+
         base_size + traces_size + buffer_size
     }
 
@@ -218,491 +414,86 @@ impl TracingSystem {
     pub fn cpu_usage_estimate(&self) -> f64 {
         // Estimate based on span processing rate and sampling
         let total_spans = self.metrics.spans_started.load(Ordering::Relaxed);
-        let sampling_rate = self.config.sampling_rate;
-        
+        let sampling_rate = self.sampler.sampling_rate();
+
         // Very rough estimate: each sampled span costs ~1μs of CPU
         let spans_per_second = total_spans as f64 / 60.0; // Assume 1-minute average
         spans_per_second * sampling_rate * 0.000001 // 1μs per span
     }
-}
 
-/// Trace identifier (128-bit)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TraceId([u8; 16]);
+    /// Cleanup old traces that have exceeded timeout
+    pub fn cleanup_expired_traces(&self) -> Result<usize> {
+        let mut cleaned = 0;
+        let timeout = Duration::from_millis(self.config.max_span_duration_ms);
+        let now = Instant::now();
 
-impl TraceId {
-    /// Generates a new random trace ID
-    pub fn generate() -> Self {
-        Self(Uuid::new_v4().into_bytes())
-    }
+        let expired_traces: Vec<TraceId> = self
+            .active_traces
+            .iter()
+            .filter_map(|entry| {
+                let trace_context = entry.value();
+                if now.duration_since(trace_context.created_at) > timeout {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-    /// Creates a trace ID from bytes
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
+        for trace_id in expired_traces {
+            if let Some((_, trace_context)) = self.active_traces.remove(&trace_id) {
+                trace_context.completed.store(true, Ordering::Release);
+                cleaned += 1;
 
-    /// Returns the trace ID as bytes
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        &self.0
-    }
-
-    /// Returns the trace ID as a hex string
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
-    }
-
-    /// Parses a trace ID from a hex string
-    pub fn from_hex(hex: &str) -> Result<Self> {
-        let bytes = hex::decode(hex)
-            .map_err(|e| TelemetryError::tracing(format!("Invalid trace ID hex: {}", e)))?;
-        
-        if bytes.len() != 16 {
-            return Err(TelemetryError::tracing("Trace ID must be 16 bytes"));
-        }
-
-        let mut array = [0u8; 16];
-        array.copy_from_slice(&bytes);
-        Ok(Self(array))
-    }
-}
-
-/// Span identifier (64-bit)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SpanId([u8; 8]);
-
-impl SpanId {
-    /// Generates a new random span ID
-    pub fn generate() -> Self {
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&Uuid::new_v4().as_bytes()[..8]);
-        Self(bytes)
-    }
-
-    /// Creates a span ID from bytes
-    pub fn from_bytes(bytes: [u8; 8]) -> Self {
-        Self(bytes)
-    }
-
-    /// Returns the span ID as bytes
-    pub fn as_bytes(&self) -> &[u8; 8] {
-        &self.0
-    }
-
-    /// Returns the span ID as a hex string
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
-    }
-
-    /// Parses a span ID from a hex string
-    pub fn from_hex(hex: &str) -> Result<Self> {
-        let bytes = hex::decode(hex)
-            .map_err(|e| TelemetryError::tracing(format!("Invalid span ID hex: {}", e)))?;
-        
-        if bytes.len() != 8 {
-            return Err(TelemetryError::tracing("Span ID must be 8 bytes"));
-        }
-
-        let mut array = [0u8; 8];
-        array.copy_from_slice(&bytes);
-        Ok(Self(array))
-    }
-}
-
-/// Trace context for propagation
-#[derive(Debug, Clone)]
-pub struct TraceContext {
-    pub trace_id: TraceId,
-    pub span_id: SpanId,
-    pub parent_span_id: Option<SpanId>,
-    pub sampling_decision: SamplingDecision,
-    pub baggage: HashMap<String, String>,
-}
-
-/// Sampling decision
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SamplingDecision {
-    /// Drop the span
-    Drop,
-    /// Record the span
-    Record,
-    /// Record and sample the span
-    RecordAndSample,
-}
-
-impl SamplingDecision {
-    pub fn is_sampled(self) -> bool {
-        matches!(self, Self::RecordAndSample)
-    }
-
-    pub fn is_recorded(self) -> bool {
-        matches!(self, Self::Record | Self::RecordAndSample)
-    }
-}
-
-/// Span representation
-#[derive(Debug, Clone)]
-pub struct Span {
-    pub context: TraceContext,
-    pub name: String,
-    pub start_time: Instant,
-    pub end_time: Option<Instant>,
-    pub status: SpanStatus,
-    pub kind: SpanKind,
-    pub attributes: SmallVec<[Attribute; 8]>,
-    pub events: SmallVec<[Event; 4]>,
-    pub links: SmallVec<[Link; 2]>,
-}
-
-impl Span {
-    /// Adds an attribute to the span
-    pub fn set_attribute(&mut self, key: &str, value: AttributeValue) {
-        self.attributes.push(Attribute {
-            key: key.to_string(),
-            value,
-        });
-    }
-
-    /// Adds an event to the span
-    pub fn add_event(&mut self, name: &str, attributes: Vec<Attribute>) {
-        self.events.push(Event {
-            name: name.to_string(),
-            timestamp: Instant::now(),
-            attributes,
-        });
-    }
-
-    /// Sets the span status
-    pub fn set_status(&mut self, status: SpanStatus) {
-        self.status = status;
-    }
-
-    /// Sets the span kind
-    pub fn set_kind(&mut self, kind: SpanKind) {
-        self.kind = kind;
-    }
-
-    /// Returns the span duration if ended
-    pub fn duration(&self) -> Option<Duration> {
-        self.end_time.map(|end| end.duration_since(self.start_time))
-    }
-}
-
-/// Span status
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SpanStatus {
-    Unset,
-    Ok,
-    Error { message: String },
-}
-
-/// Span kind
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpanKind {
-    Internal,
-    Server,
-    Client,
-    Producer,
-    Consumer,
-}
-
-/// Span attribute
-#[derive(Debug, Clone)]
-pub struct Attribute {
-    pub key: String,
-    pub value: AttributeValue,
-}
-
-/// Attribute value types
-#[derive(Debug, Clone)]
-pub enum AttributeValue {
-    String(String),
-    Bool(bool),
-    Int(i64),
-    Double(f64),
-    Array(Vec<AttributeValue>),
-}
-
-/// Span event
-#[derive(Debug, Clone)]
-pub struct Event {
-    pub name: String,
-    pub timestamp: Instant,
-    pub attributes: Vec<Attribute>,
-}
-
-/// Span link
-#[derive(Debug, Clone)]
-pub struct Link {
-    pub trace_id: TraceId,
-    pub span_id: SpanId,
-    pub attributes: Vec<Attribute>,
-}
-
-/// Trace sampler trait
-pub trait TraceSampler: Send + Sync {
-    fn should_sample(&self, input: &SamplingInput) -> SamplingDecision;
-}
-
-/// Sampling input data
-pub struct SamplingInput<'a> {
-    pub trace_id: TraceId,
-    pub span_id: SpanId,
-    pub parent_span_id: Option<SpanId>,
-    pub name: &'a str,
-    pub kind: SpanKind,
-    pub attributes: &'a [Attribute],
-}
-
-/// Always sample (for debugging)
-pub struct AlwaysSampler;
-
-impl TraceSampler for AlwaysSampler {
-    fn should_sample(&self, _input: &SamplingInput) -> SamplingDecision {
-        SamplingDecision::RecordAndSample
-    }
-}
-
-/// Never sample (disabled tracing)
-pub struct NeverSampler;
-
-impl TraceSampler for NeverSampler {
-    fn should_sample(&self, _input: &SamplingInput) -> SamplingDecision {
-        SamplingDecision::Drop
-    }
-}
-
-/// Probability-based sampler
-pub struct ProbabilitySampler {
-    threshold: u64,
-}
-
-impl ProbabilitySampler {
-    pub fn new(probability: f64) -> Self {
-        let threshold = (probability * (u64::MAX as f64)) as u64;
-        Self { threshold }
-    }
-}
-
-impl TraceSampler for ProbabilitySampler {
-    fn should_sample(&self, input: &SamplingInput) -> SamplingDecision {
-        // Use trace ID for consistent sampling
-        let trace_bytes = input.trace_id.as_bytes();
-        let hash = u64::from_be_bytes([
-            trace_bytes[0], trace_bytes[1], trace_bytes[2], trace_bytes[3],
-            trace_bytes[4], trace_bytes[5], trace_bytes[6], trace_bytes[7],
-        ]);
-        
-        if hash <= self.threshold {
-            SamplingDecision::RecordAndSample
-        } else {
-            SamplingDecision::Drop
-        }
-    }
-}
-
-/// Context propagator for distributed tracing
-pub struct ContextPropagator;
-
-impl ContextPropagator {
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Injects trace context into headers (W3C Trace Context format)
-    pub fn inject(&self, context: &TraceContext, headers: &mut HashMap<String, String>) {
-        // W3C Trace Context: traceparent header
-        let traceparent = format!(
-            "00-{}-{}-{:02x}",
-            context.trace_id.to_hex(),
-            context.span_id.to_hex(),
-            if context.sampling_decision.is_sampled() { 1 } else { 0 }
-        );
-        headers.insert("traceparent".to_string(), traceparent);
-
-        // W3C Trace Context: tracestate header (baggage)
-        if !context.baggage.is_empty() {
-            let tracestate = context.baggage
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join(",");
-            headers.insert("tracestate".to_string(), tracestate);
-        }
-    }
-
-    /// Extracts trace context from headers
-    pub fn extract(&self, headers: &HashMap<String, String>) -> Option<TraceContext> {
-        let traceparent = headers.get("traceparent")?;
-        self.parse_traceparent(traceparent, headers)
-    }
-
-    fn parse_traceparent(&self, traceparent: &str, headers: &HashMap<String, String>) -> Option<TraceContext> {
-        let parts: Vec<&str> = traceparent.split('-').collect();
-        if parts.len() != 4 {
-            return None;
-        }
-
-        // Parse version (should be "00")
-        if parts[0] != "00" {
-            return None;
-        }
-
-        // Parse trace ID
-        let trace_id = TraceId::from_hex(parts[1]).ok()?;
-
-        // Parse span ID
-        let span_id = SpanId::from_hex(parts[2]).ok()?;
-
-        // Parse flags
-        let flags = u8::from_str_radix(parts[3], 16).ok()?;
-        let sampling_decision = if flags & 0x01 != 0 {
-            SamplingDecision::RecordAndSample
-        } else {
-            SamplingDecision::Drop
-        };
-
-        // Parse baggage from tracestate
-        let mut baggage = HashMap::new();
-        if let Some(tracestate) = headers.get("tracestate") {
-            for pair in tracestate.split(',') {
-                if let Some((key, value)) = pair.split_once('=') {
-                    baggage.insert(key.trim().to_string(), value.trim().to_string());
+                // Mark all spans in trace as timed out
+                let mut spans = trace_context.spans.write();
+                for span in spans.values_mut() {
+                    if let Some(mut_span) = Arc::get_mut(span) {
+                        mut_span.status = SpanStatus::Timeout;
+                        mut_span.end_time = Some(SystemTime::now());
+                    }
                 }
             }
         }
 
-        Some(TraceContext {
-            trace_id,
-            span_id,
-            parent_span_id: None, // Will be set by caller if needed
-            sampling_decision,
-            baggage,
-        })
-    }
-}
+        self.metrics.active_traces.fetch_sub(cleaned, Ordering::Relaxed);
 
-/// Span processor for batched export
-pub struct SpanProcessor {
-    sender: mpsc::UnboundedSender<SpanProcessorMessage>,
-}
-
-impl SpanProcessor {
-    pub fn new(config: TracingConfig, buffer: Arc<SpanBuffer>) -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        
-        Self { sender }
+        Ok(cleaned)
     }
 
-    pub fn process_span(&self, span: Span) -> Result<()> {
-        self.sender.send(SpanProcessorMessage::ProcessSpan(span))
-            .map_err(|_| TelemetryError::tracing("Span processor channel closed"))?;
+    /// Flush buffered spans for export
+    pub async fn flush(&self) -> Result<Vec<Arc<Span>>> {
+        let spans = self.span_buffer.lock().drain();
+        Ok(spans)
+    }
+
+    /// Shutdown the tracing system
+    pub async fn shutdown(&self) -> Result<()> {
+        // Finish all active traces
+        let trace_ids: Vec<TraceId> = self.active_traces.iter().map(|entry| *entry.key()).collect();
+        for trace_id in trace_ids {
+            let _ = self.finish_trace(trace_id);
+        }
+
+        // Flush remaining spans
+        let _ = self.flush().await;
+
         Ok(())
-    }
-
-    pub async fn flush(&self) -> Result<()> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender.send(SpanProcessorMessage::Flush(sender))
-            .map_err(|_| TelemetryError::tracing("Span processor channel closed"))?;
-        
-        receiver.await
-            .map_err(|_| TelemetryError::tracing("Flush operation failed"))?
-    }
-
-    pub async fn run_background_processing(&self, config: TracingConfig) {
-        // Background processing would be implemented here
-        // For brevity, this is a placeholder
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-}
-
-enum SpanProcessorMessage {
-    ProcessSpan(Span),
-    Flush(oneshot::Sender<Result<()>>),
-    Shutdown,
-}
-
-/// Span buffer for batched processing
-pub struct SpanBuffer {
-    spans: parking_lot::Mutex<Vec<Span>>,
-    capacity: usize,
-    size: AtomicUsize,
-}
-
-impl SpanBuffer {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            spans: parking_lot::Mutex::new(Vec::with_capacity(capacity)),
-            capacity,
-            size: AtomicUsize::new(0),
-        }
-    }
-
-    pub fn add_span(&self, span: Span) -> bool {
-        let mut spans = self.spans.lock();
-        if spans.len() < self.capacity {
-            spans.push(span);
-            self.size.store(spans.len(), Ordering::Relaxed);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn drain_spans(&self) -> Vec<Span> {
-        let mut spans = self.spans.lock();
-        let drained = std::mem::take(&mut *spans);
-        self.size.store(0, Ordering::Relaxed);
-        drained
-    }
-
-    pub fn size(&self) -> usize {
-        self.size.load(Ordering::Relaxed)
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    pub fn memory_usage(&self) -> usize {
-        let base_size = std::mem::size_of::<Self>();
-        let spans_size = self.size() * std::mem::size_of::<Span>();
-        base_size + spans_size
-    }
-}
-
-/// Tracing performance metrics
-#[derive(Debug)]
-pub struct TracingMetrics {
-    pub spans_started: AtomicU64,
-    pub spans_ended: AtomicU64,
-    pub spans_sampled: AtomicU64,
-    pub spans_dropped: AtomicU64,
-    pub processing_errors: AtomicU64,
-}
-
-impl TracingMetrics {
-    pub fn new() -> Self {
-        Self {
-            spans_started: AtomicU64::new(0),
-            spans_ended: AtomicU64::new(0),
-            spans_sampled: AtomicU64::new(0),
-            spans_dropped: AtomicU64::new(0),
-            processing_errors: AtomicU64::new(0),
-        }
     }
 }
 
 /// Snapshot of tracing metrics
 #[derive(Debug, Clone)]
 pub struct TracingMetricsSnapshot {
+    pub traces_started: u64,
+    pub traces_completed: u64,
     pub spans_started: u64,
-    pub spans_ended: u64,
+    pub spans_completed: u64,
     pub spans_sampled: u64,
-    pub spans_dropped: u64,
-    pub processing_errors: u64,
+    pub spans_exported: u64,
+    pub export_failures: u64,
     pub active_traces: usize,
-    pub buffer_size: usize,
-    pub buffer_capacity: usize,
+    pub active_spans: usize,
 }
 
 #[cfg(test)]
@@ -710,172 +501,155 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_trace_id_generation() {
-        let trace_id1 = TraceId::generate();
-        let trace_id2 = TraceId::generate();
-        
-        assert_ne!(trace_id1, trace_id2);
-        assert_eq!(trace_id1.as_bytes().len(), 16);
-    }
-
-    #[test]
-    fn test_trace_id_hex_conversion() {
-        let trace_id = TraceId::generate();
-        let hex = trace_id.to_hex();
-        let parsed = TraceId::from_hex(&hex).unwrap();
-        
-        assert_eq!(trace_id, parsed);
-        assert_eq!(hex.len(), 32);
+    async fn test_tracing_system_creation() {
+        let config = TracingConfig::default();
+        let system = TracingSystem::new(config);
+        assert!(system.is_ok());
     }
 
     #[tokio::test]
-    async fn test_span_creation() {
+    async fn test_start_and_finish_trace() {
         let config = TracingConfig::default();
-        let tracing = TracingSystem::new(config).await.unwrap();
-        
-        let span = tracing.start_span("test_operation", None);
-        assert_eq!(span.name, "test_operation");
-        assert!(span.end_time.is_none());
-        
-        tracing.end_span(span);
-        
-        let metrics = tracing.metrics();
-        assert_eq!(metrics.spans_started, 1);
-        assert_eq!(metrics.spans_ended, 1);
+        let system = TracingSystem::new(config).unwrap();
+
+        let trace = system.start_trace("test_operation".to_string()).unwrap();
+        let trace_id = trace.trace_id;
+
+        let metrics_before = system.metrics();
+        assert_eq!(metrics_before.traces_started, 1);
+        assert_eq!(metrics_before.active_traces, 1);
+
+        system.finish_trace(trace_id).unwrap();
+
+        let metrics_after = system.metrics();
+        assert_eq!(metrics_after.traces_completed, 1);
+        assert_eq!(metrics_after.active_traces, 0);
     }
 
-    #[test]
-    fn test_probability_sampler() {
-        let sampler = ProbabilitySampler::new(0.1); // 10% sampling
-        
-        let mut sampled_count = 0;
-        let total_samples = 1000;
-        
-        for i in 0..total_samples {
-            let trace_id = TraceId::generate();
-            let span_id = SpanId::generate();
-            
-            let input = SamplingInput {
-                trace_id,
-                span_id,
-                parent_span_id: None,
-                name: "test",
-                kind: SpanKind::Internal,
-                attributes: &[],
-            };
-            
-            if sampler.should_sample(&input).is_sampled() {
-                sampled_count += 1;
+    #[tokio::test]
+    async fn test_sampling_always_off() {
+        let config =
+            TracingConfig { sampling_strategy: SamplingStrategy::AlwaysOff, ..Default::default() };
+        let system = TracingSystem::new(config).unwrap();
+
+        let result = system.start_trace("test_operation".to_string());
+        assert!(result.is_err()); // Should not sample
+
+        let metrics = system.metrics();
+        assert_eq!(metrics.traces_started, 0);
+    }
+
+    #[tokio::test]
+    async fn test_sampling_percentage() {
+        let config = TracingConfig {
+            sampling_strategy: SamplingStrategy::Percentage(0.5),
+            ..Default::default()
+        };
+        let system = TracingSystem::new(config).unwrap();
+
+        // Test multiple traces to see sampling behavior
+        let mut sampled = 0;
+        for i in 0..100 {
+            let operation_name = format!("test_operation_{}", i);
+            if system.start_trace(operation_name).is_ok() {
+                sampled += 1;
             }
         }
-        
-        // Should be approximately 10% (with some variance)
-        let sampling_rate = sampled_count as f64 / total_samples as f64;
-        assert!(sampling_rate > 0.05 && sampling_rate < 0.15);
+
+        // With 50% sampling and 100 attempts, we expect roughly 50 sampled traces
+        // Allow some variance due to probabilistic nature
+        assert!(sampled > 30 && sampled < 70);
     }
 
-    #[test]
-    fn test_context_propagation() {
-        let propagator = ContextPropagator::new();
-        
-        let context = TraceContext {
-            trace_id: TraceId::generate(),
-            span_id: SpanId::generate(),
-            parent_span_id: None,
-            sampling_decision: SamplingDecision::RecordAndSample,
-            baggage: {
-                let mut map = HashMap::new();
-                map.insert("user".to_string(), "123".to_string());
-                map
-            },
+    #[tokio::test]
+    async fn test_memory_usage_tracking() {
+        let config = TracingConfig::default();
+        let system = TracingSystem::new(config).unwrap();
+
+        let initial_memory = system.memory_usage();
+
+        // Start some traces
+        for i in 0..10 {
+            let _ = system.start_trace(format!("test_operation_{}", i));
+        }
+
+        let after_memory = system.memory_usage();
+        assert!(after_memory > initial_memory);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_expired_traces() {
+        let config = TracingConfig {
+            max_span_duration_ms: 1, // Very short timeout for testing
+            ..Default::default()
         };
-        
-        let mut headers = HashMap::new();
-        propagator.inject(&context, &mut headers);
-        
-        assert!(headers.contains_key("traceparent"));
-        assert!(headers.contains_key("tracestate"));
-        
-        let extracted = propagator.extract(&headers).unwrap();
-        assert_eq!(extracted.trace_id, context.trace_id);
-        assert_eq!(extracted.span_id, context.span_id);
-        assert_eq!(extracted.sampling_decision, context.sampling_decision);
-        assert_eq!(extracted.baggage.get("user"), Some(&"123".to_string()));
-    }
+        let system = TracingSystem::new(config).unwrap();
 
-    #[bench]
-    fn bench_span_creation_not_sampled(b: &mut test::Bencher) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let tracing = rt.block_on(async {
-            let mut config = TracingConfig::default();
-            config.sampling_rate = 0.0; // No sampling
-            TracingSystem::new(config).await.unwrap()
-        });
-        
-        b.iter(|| {
-            let start = std::time::Instant::now();
-            let span = tracing.start_span("test", None);
-            tracing.end_span(span);
-            let elapsed = start.elapsed();
-            
-            // Verify performance target (<1μs when not sampled)
-            assert!(elapsed < Duration::from_micros(1));
-        });
-    }
+        // Start a trace
+        let _trace = system.start_trace("test_operation".to_string()).unwrap();
 
-    #[bench]
-    fn bench_span_creation_sampled(b: &mut test::Bencher) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let tracing = rt.block_on(async {
-            let mut config = TracingConfig::default();
-            config.sampling_rate = 1.0; // Always sample
-            TracingSystem::new(config).await.unwrap()
-        });
-        
-        b.iter(|| {
-            let start = std::time::Instant::now();
-            let span = tracing.start_span("test", None);
-            tracing.end_span(span);
-            let elapsed = start.elapsed();
-            
-            // Verify performance target (<10μs when sampled)
-            assert!(elapsed < Duration::from_micros(10));
-        });
+        // Wait for timeout
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Cleanup should remove the expired trace
+        let cleaned = system.cleanup_expired_traces().unwrap();
+        assert_eq!(cleaned, 1);
+
+        let metrics = system.metrics();
+        assert_eq!(metrics.active_traces, 0);
     }
 
     #[test]
     fn test_span_buffer() {
-        let buffer = SpanBuffer::new(10);
-        assert_eq!(buffer.size(), 0);
-        assert_eq!(buffer.capacity(), 10);
-        
-        // Add spans
-        for i in 0..5 {
-            let span = Span {
-                context: TraceContext {
-                    trace_id: TraceId::generate(),
-                    span_id: SpanId::generate(),
-                    parent_span_id: None,
-                    sampling_decision: SamplingDecision::RecordAndSample,
-                    baggage: HashMap::new(),
-                },
-                name: format!("span_{}", i),
-                start_time: Instant::now(),
-                end_time: None,
-                status: SpanStatus::Unset,
-                kind: SpanKind::Internal,
-                attributes: SmallVec::new(),
-                events: SmallVec::new(),
-                links: SmallVec::new(),
-            };
-            
-            assert!(buffer.add_span(span));
-        }
-        
-        assert_eq!(buffer.size(), 5);
-        
-        let spans = buffer.drain_spans();
-        assert_eq!(spans.len(), 5);
-        assert_eq!(buffer.size(), 0);
+        let mut buffer = SpanBuffer::new(2);
+        assert!(buffer.is_empty());
+
+        let span1 = Arc::new(Span {
+            span_id: 1,
+            parent_span_id: None,
+            trace_id: 1,
+            operation_name: "test1".to_string(),
+            start_time: SystemTime::now(),
+            end_time: None,
+            tags: HashMap::new(),
+            logs: Vec::new(),
+            status: SpanStatus::Active,
+        });
+
+        let span2 = Arc::new(Span {
+            span_id: 2,
+            parent_span_id: None,
+            trace_id: 2,
+            operation_name: "test2".to_string(),
+            start_time: SystemTime::now(),
+            end_time: None,
+            tags: HashMap::new(),
+            logs: Vec::new(),
+            status: SpanStatus::Active,
+        });
+
+        assert!(buffer.push(span1));
+        assert_eq!(buffer.len(), 1);
+
+        assert!(buffer.push(span2));
+        assert_eq!(buffer.len(), 2);
+
+        // Buffer is full
+        let span3 = Arc::new(Span {
+            span_id: 3,
+            parent_span_id: None,
+            trace_id: 3,
+            operation_name: "test3".to_string(),
+            start_time: SystemTime::now(),
+            end_time: None,
+            tags: HashMap::new(),
+            logs: Vec::new(),
+            status: SpanStatus::Active,
+        });
+        assert!(!buffer.push(span3)); // Should fail
+
+        let drained = buffer.drain();
+        assert_eq!(drained.len(), 2);
+        assert!(buffer.is_empty());
     }
 }

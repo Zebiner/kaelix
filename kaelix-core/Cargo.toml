@@ -1,107 +1,100 @@
 [package]
 name = "kaelix-core"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation.workspace = true
-description = "Core streaming library for MemoryStreamer"
-keywords.workspace = true
-categories.workspace = true
+version = "0.1.0"
+edition = "2021"
+description = "Core types and utilities for the Kaelix streaming platform"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-# Core async runtime
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-futures = { workspace = true }
-async-trait = { workspace = true }
-
-# Data handling
-serde = { workspace = true }
+# Core dependencies
+uuid = { workspace = true, features = ["v4", "serde"] }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-bincode = { workspace = true }
-bytes = { workspace = true, features = ["serde"] }
-smallvec = { workspace = true }
-
-# Configuration management
-toml = "0.8"
-validator = { version = "0.18", features = ["derive"] }
-notify = "6.1"
-dirs = "5.0"
-num_cpus = "1.16"
-
-# Concurrency and performance
-crossbeam = { workspace = true }
-crossbeam-channel = { workspace = true }
-crossbeam-queue = { workspace = true }
-crossbeam-utils = { workspace = true }
-parking_lot = { workspace = true }
-
-# High-performance data structures for multiplexing
-dashmap = "6.1"
-lru = "0.12"
-
-# Runtime and system integration
-libc = "0.2"
-
-# Error handling
+toml = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
-# Utilities
-uuid = { workspace = true }
-chrono = { workspace = true }
-semver = { version = "1.0", features = ["serde"] }
+# Async runtime
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
 
-# Observability and telemetry
+# Concurrency primitives
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+num_cpus = { workspace = true }
+
+# Networking
+bytes = { workspace = true }
+
+# Logging and tracing
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-opentelemetry = "0.21"
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+tracing-opentelemetry = { workspace = true }
+
+# Time utilities
+chrono = { workspace = true, features = ["serde", "std"] }
+
+# Configuration and observability
+config = { workspace = true }
+
+# Compression
+flate2 = { workspace = true }
+lz4 = { workspace = true }
+
+# Cryptographic utilities
+blake3 = { workspace = true }
+crc32fast = { workspace = true }
+
+# Error handling
+color-eyre = { workspace = true }
+
+# File system operations
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+dirs = "5.0"
+
+# Serialization formats  
+bincode = { workspace = true }
+
+# Async trait support
+async-trait = { workspace = true }
+
+# Process and system utilities
+signal-hook = { workspace = true }
+signal-hook-tokio = { workspace = true, features = ["futures-v0_3"] }
+
+# Memory management
+arc-swap = { workspace = true }
+
+# Testing utilities
+proptest = { workspace = true, optional = true }
 
 # High-performance metrics
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 
-# OpenTelemetry integration
-opentelemetry = "0.20"
-opentelemetry-jaeger = "0.19"
-opentelemetry-prometheus = "0.13"
+# OpenTelemetry integration - compatible versions
+opentelemetry = "0.22.0"
+opentelemetry_sdk = "0.22.1"
+opentelemetry-jaeger = "0.21.0"
+notify = { workspace = true, optional = true }
 
-# HTTP client for metrics export
-reqwest = { version = "0.11", features = ["json"] }
-
-# Time and duration handling
-time = "0.3"
-
-# SIMD optimizations
-wide = "0.7"
-
-# Hex encoding for trace/span IDs
-hex = "0.4"
-
-# Random number generation for sampling
-rand = { workspace = true }
-
-# Security
-zeroize = { workspace = true }
-
-# Plugin system
-libloading = { version = "0.8", optional = true }
+# Plugin system support
+libloading = { workspace = true }
+validator = "0.20.0"
+zeroize.workspace = true
 
 [features]
-default = ["telemetry", "multiplexing"]
-telemetry = []
-multiplexing = []
-plugin-dynamic-loading = ["libloading"]
-high-performance = ["telemetry", "multiplexing"]
+experimental = []
+default = ["runtime"]
+runtime = []
+testing = ["proptest"]
+hot-reload = ["notify", "dep:notify"]
+notify = ["dep:notify"]
 
 [dev-dependencies]
+tokio-test = { workspace = true }
+criterion = { workspace = true, features = ["html_reports"] }
 proptest = { workspace = true }
-test-case = { workspace = true }
-rstest = { workspace = true }
-tokio-test = "0.4"
-tempfile = "3.8"
-criterion = { workspace = true }

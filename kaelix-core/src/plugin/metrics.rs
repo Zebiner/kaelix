@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
@@ -137,7 +137,10 @@ impl PluginMonitor {
     }
 
     /// Collect current metrics for a specific plugin.
-    pub async fn collect_metrics(&self, plugin_id: crate::plugin::PluginId) -> Option<PluginMetricsSnapshot> {
+    pub async fn collect_metrics(
+        &self,
+        plugin_id: crate::plugin::PluginId,
+    ) -> Option<PluginMetricsSnapshot> {
         let metrics_map = self.plugin_metrics.read().await;
         if let Some(metrics) = metrics_map.get(&plugin_id) {
             Some(metrics.to_snapshot().await)
@@ -147,7 +150,9 @@ impl PluginMonitor {
     }
 
     /// Collect metrics for all monitored plugins.
-    pub async fn collect_all_metrics(&self) -> HashMap<crate::plugin::PluginId, PluginMetricsSnapshot> {
+    pub async fn collect_all_metrics(
+        &self,
+    ) -> HashMap<crate::plugin::PluginId, PluginMetricsSnapshot> {
         let metrics_map = self.plugin_metrics.read().await;
         let mut result = HashMap::new();
 
@@ -255,7 +260,9 @@ impl Clone for PluginMetrics {
     fn clone(&self) -> Self {
         Self {
             invocation_count: AtomicU64::new(self.invocation_count.load(Ordering::Relaxed)),
-            successful_invocations: AtomicU64::new(self.successful_invocations.load(Ordering::Relaxed)),
+            successful_invocations: AtomicU64::new(
+                self.successful_invocations.load(Ordering::Relaxed),
+            ),
             failed_invocations: AtomicU64::new(self.failed_invocations.load(Ordering::Relaxed)),
             total_processing_time: self.total_processing_time.clone(),
             min_processing_time: self.min_processing_time.clone(),
@@ -313,7 +320,7 @@ impl PluginMetrics {
             match *min_time {
                 None => *min_time = Some(duration),
                 Some(current_min) if duration < current_min => *min_time = Some(duration),
-                _ => {}
+                _ => {},
             }
         }
 
@@ -323,7 +330,7 @@ impl PluginMetrics {
             match *max_time {
                 None => *max_time = Some(duration),
                 Some(current_max) if duration > current_max => *max_time = Some(duration),
-                _ => {}
+                _ => {},
             }
         }
 
@@ -353,7 +360,7 @@ impl PluginMetrics {
     pub fn success_rate(&self) -> f64 {
         let total = self.total_invocations();
         let successful = self.successful_invocations();
-        
+
         if total > 0 {
             (successful as f64 / total as f64) * 100.0
         } else {
@@ -392,17 +399,24 @@ impl PluginMetrics {
     /// Update memory usage.
     pub fn update_memory_usage(&self, current_bytes: u64) {
         self.current_memory_usage.store(current_bytes, Ordering::Relaxed);
-        
+
         // Update peak if necessary
         loop {
             let current_peak = self.peak_memory_usage.load(Ordering::Relaxed);
             if current_bytes <= current_peak {
                 break;
             }
-            
-            if self.peak_memory_usage
-                .compare_exchange_weak(current_peak, current_bytes, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok() {
+
+            if self
+                .peak_memory_usage
+                .compare_exchange_weak(
+                    current_peak,
+                    current_bytes,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
                 break;
             }
         }
@@ -490,7 +504,10 @@ impl PluginMetrics {
             peak_cpu_usage: self.peak_cpu().await,
             custom_metrics: self.get_all_custom_metrics().await,
             uptime: self.uptime(),
-            created_at_timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            created_at_timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         }
     }
 }
@@ -665,7 +682,7 @@ impl GlobalMetrics {
     pub fn global_success_rate(&self) -> f64 {
         let total = self.total_invocations();
         let successful = self.total_successful();
-        
+
         if total > 0 {
             (successful as f64 / total as f64) * 100.0
         } else {
@@ -812,7 +829,7 @@ mod tests {
     #[tokio::test]
     async fn test_plugin_metrics_invocation_recording() {
         let metrics = PluginMetrics::new();
-        
+
         // Record successful invocation
         metrics.record_invocation(Duration::from_millis(100), true).await;
         assert_eq!(metrics.total_invocations(), 1);
@@ -841,11 +858,17 @@ mod tests {
     #[tokio::test]
     async fn test_custom_metrics() {
         let metrics = PluginMetrics::new();
-        
+
         // Set custom metrics
-        metrics.set_custom_metric("requests_per_second".to_string(), MetricValue::Gauge(42.5)).await;
-        metrics.set_custom_metric("cache_hits".to_string(), MetricValue::Counter(1000)).await;
-        metrics.set_custom_metric("feature_enabled".to_string(), MetricValue::Boolean(true)).await;
+        metrics
+            .set_custom_metric("requests_per_second".to_string(), MetricValue::Gauge(42.5))
+            .await;
+        metrics
+            .set_custom_metric("cache_hits".to_string(), MetricValue::Counter(1000))
+            .await;
+        metrics
+            .set_custom_metric("feature_enabled".to_string(), MetricValue::Boolean(true))
+            .await;
 
         // Retrieve custom metrics
         let rps = metrics.get_custom_metric("requests_per_second").await;
@@ -865,7 +888,7 @@ mod tests {
     #[test]
     fn test_memory_usage_tracking() {
         let metrics = PluginMetrics::new();
-        
+
         // Update memory usage
         metrics.update_memory_usage(1024);
         assert_eq!(metrics.current_memory(), 1024);
@@ -885,7 +908,7 @@ mod tests {
     #[tokio::test]
     async fn test_cpu_usage_tracking() {
         let metrics = PluginMetrics::new();
-        
+
         // Update CPU usage
         metrics.update_cpu_usage(25.5).await;
         assert_eq!(metrics.current_cpu().await, 25.5);
@@ -910,7 +933,7 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_snapshot() {
         let metrics = PluginMetrics::new();
-        
+
         // Record some data
         metrics.record_invocation(Duration::from_millis(100), true).await;
         metrics.record_invocation(Duration::from_millis(200), false).await;
@@ -958,7 +981,7 @@ mod tests {
     #[test]
     fn test_global_metrics() {
         let global = GlobalMetrics::new();
-        
+
         // Record some invocations
         global.record_invocation(Duration::from_millis(100), true);
         global.record_invocation(Duration::from_millis(200), false);
@@ -967,7 +990,7 @@ mod tests {
         assert_eq!(global.total_invocations(), 3);
         assert_eq!(global.total_successful(), 2);
         assert_eq!(global.total_failed(), 1);
-        assert_eq!(global.global_success_rate(), 2.0/3.0 * 100.0);
+        assert_eq!(global.global_success_rate(), 2.0 / 3.0 * 100.0);
 
         // Reset
         global.reset();

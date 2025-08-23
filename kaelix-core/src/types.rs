@@ -11,6 +11,19 @@ pub type Timestamp = DateTime<Utc>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct PartitionId(pub u32);
 
+impl PartitionId {
+    /// Create a new partition ID.
+    #[must_use]
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    /// Get the raw partition ID value.
+    #[must_use]
+    pub const fn value(self) -> u32 {
+        self.0
+    }
+}
 impl fmt::Display for PartitionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

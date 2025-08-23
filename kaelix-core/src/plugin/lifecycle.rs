@@ -4,7 +4,6 @@ use crate::plugin::{PluginError, PluginId, PluginResult};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::time::timeout;
 
 /// Plugin lifecycle states for state machine management.
 ///
@@ -40,6 +39,21 @@ pub enum PluginState {
 impl Default for PluginState {
     fn default() -> Self {
         Self::Unloaded
+    }
+}
+
+impl std::fmt::Display for PluginState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unloaded => write!(f, "Unloaded"),
+            Self::Loading => write!(f, "Loading"),
+            Self::Initializing => write!(f, "Initializing"),
+            Self::Running => write!(f, "Running"),
+            Self::Paused => write!(f, "Paused"),
+            Self::Stopped => write!(f, "Stopped"),
+            Self::Reloading => write!(f, "Reloading"),
+            Self::Failed => write!(f, "Failed"),
+        }
     }
 }
 
@@ -116,10 +130,7 @@ impl RestartPolicy {
 
     /// Create an aggressive restart policy for development.
     pub fn aggressive() -> Self {
-        Self::Always {
-            max_attempts: 10,
-            restart_delay: Duration::from_secs(1),
-        }
+        Self::Always { max_attempts: 10, restart_delay: Duration::from_secs(1) }
     }
 
     /// Create a no-restart policy.
@@ -230,7 +241,7 @@ impl PluginLifecycle {
 
     /// Get the plugin ID.
     pub fn plugin_id(&self) -> PluginId {
-        self.plugin_id
+        self.plugin_id.clone()
     }
 
     /// Get the restart policy.
@@ -259,183 +270,91 @@ impl PluginLifecycle {
     }
 
     /// Transition to a new state.
-    ///
-    /// Validates the transition and updates the state machine accordingly.
-    ///
-    /// # Parameters
-    /// - `target_state`: The state to transition to
-    ///
-    /// # Returns
-    /// - `Ok(())`: Transition successful
-    /// - `Err(PluginError)`: Invalid transition or transition failed
-    pub async fn transition_to(&mut self, target_state: PluginState) -> PluginResult<()> {
-        let current = self.current_state().await;
-
-        // Validate transition
-        if !current.can_transition_to(target_state) {
+    pub async fn transition_to(&mut self, new_state: PluginState) -> PluginResult<()> {
+        if !self.current_state.can_transition_to(new_state) {
             return Err(PluginError::InvalidStateTransition {
                 plugin_id: self.plugin_id.to_string(),
-                from: format!("{:?}", current),
-                to: format!("{:?}", target_state),
+                from: self.current_state.to_string(),
+                to: new_state.to_string(),
             });
         }
 
-        // Perform the transition
-        self.previous_state = Some(current);
-        self.current_state = target_state;
-        self.stats.record_transition();
-
-        tracing::debug!(
-            plugin_id = %self.plugin_id,
-            from_state = ?current,
-            to_state = ?target_state,
-            "Plugin state transition"
-        );
-
-        // Handle special transition logic
-        match target_state {
-            PluginState::Failed => {
-                self.handle_failure().await?;
-            }
-            PluginState::Loading => {
-                // Reset restart attempts on manual restart
-                if matches!(current, PluginState::Failed | PluginState::Stopped) {
-                    self.restart_attempts = 0;
-                }
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    /// Force transition to a state without validation (emergency use only).
-    ///
-    /// # Safety
-    /// This bypasses all validation and should only be used in emergency
-    /// situations where the normal state machine has become corrupted.
-    pub async fn force_transition(&mut self, target_state: PluginState) {
-        tracing::warn!(
-            plugin_id = %self.plugin_id,
-            from_state = ?self.current_state,
-            to_state = ?target_state,
-            "Force state transition (emergency)"
-        );
-
         self.previous_state = Some(self.current_state);
-        self.current_state = target_state;
-    }
+        self.current_state = new_state;
 
-    /// Handle plugin failure and apply restart policy.
-    async fn handle_failure(&mut self) -> PluginResult<()> {
-        tracing::warn!(
-            plugin_id = %self.plugin_id,
-            restart_attempts = self.restart_attempts,
-            "Plugin failed, evaluating restart policy"
-        );
-
-        match &self.restart_policy {
-            RestartPolicy::Never => {
-                tracing::info!(
-                    plugin_id = %self.plugin_id,
-                    "Plugin failure - no restart policy"
-                );
-            }
-            RestartPolicy::Always { max_attempts, restart_delay } => {
-                if self.restart_attempts < *max_attempts {
-                    self.schedule_restart(*restart_delay).await?;
-                } else {
-                    tracing::error!(
-                        plugin_id = %self.plugin_id,
-                        max_attempts = max_attempts,
-                        "Plugin exceeded maximum restart attempts"
-                    );
-                }
-            }
-            RestartPolicy::OnFailure {
-                max_attempts,
-                restart_delay,
-                backoff_multiplier,
-            } => {
-                if self.restart_attempts < *max_attempts {
-                    let delay = Duration::from_secs_f64(
-                        restart_delay.as_secs_f64() * backoff_multiplier.powi(self.restart_attempts as i32)
-                    );
-                    self.schedule_restart(delay).await?;
-                } else {
-                    tracing::error!(
-                        plugin_id = %self.plugin_id,
-                        max_attempts = max_attempts,
-                        "Plugin exceeded maximum restart attempts with backoff"
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Schedule a plugin restart after the specified delay.
-    async fn schedule_restart(&mut self, delay: Duration) -> PluginResult<()> {
-        self.restart_attempts += 1;
-        self.last_restart = Some(Instant::now());
-        self.stats.record_restart();
+        // Update statistics
+        self.stats.state_transitions.fetch_add(1, Ordering::Relaxed);
 
         tracing::info!(
             plugin_id = %self.plugin_id,
-            restart_attempt = self.restart_attempts,
-            delay_ms = delay.as_millis(),
-            "Scheduling plugin restart"
+            from_state = ?self.previous_state,
+            to_state = ?new_state,
+            "Plugin state transition"
         );
 
-        // In a real implementation, this would schedule an async task
-        // to restart the plugin after the delay
-        // For now, we just record the intent
         Ok(())
     }
 
-    /// Perform a health check with timeout.
-    ///
-    /// # Parameters
-    /// - `health_check`: Async function that performs the health check
-    /// - `timeout_duration`: Maximum time to wait for health check
-    ///
-    /// # Returns
-    /// - `Ok(true)`: Health check passed
-    /// - `Ok(false)`: Health check failed
-    /// - `Err(PluginError)`: Health check timed out or errored
-    pub async fn health_check<F, Fut>(&self, health_check: F, timeout_duration: Duration) -> PluginResult<bool>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = PluginResult<bool>>,
-    {
-        let start_time = Instant::now();
+    /// Force transition to a state (bypass validation).
+    pub async fn force_transition_to(&mut self, new_state: PluginState) {
+        self.previous_state = Some(self.current_state);
+        self.current_state = new_state;
 
-        let result = match timeout(timeout_duration, health_check()).await {
-            Ok(health_result) => {
-                let success = health_result.unwrap_or(false);
-                self.stats.record_health_check(success);
-                Ok(success)
-            }
-            Err(_) => {
-                self.stats.record_health_check(false);
-                Err(PluginError::ExecutionError {
-                    plugin_id: self.plugin_id.to_string(),
-                    operation: "health_check".to_string(),
-                    reason: format!("Health check timed out after {:?}", timeout_duration),
-                })
-            }
-        };
+        // Update statistics
+        self.stats.forced_transitions.fetch_add(1, Ordering::Relaxed);
 
-        let check_duration = start_time.elapsed();
-        tracing::debug!(
+        tracing::warn!(
             plugin_id = %self.plugin_id,
-            duration_ms = check_duration.as_millis(),
-            success = result.as_ref().unwrap_or(&false),
-            "Health check completed"
+            from_state = ?self.previous_state,
+            to_state = ?new_state,
+            "Forced plugin state transition"
         );
+    }
 
-        result
+    /// Check if a restart should be attempted based on the restart policy.
+    pub fn should_restart(&self) -> bool {
+        match &self.restart_policy {
+            RestartPolicy::Never => false,
+            RestartPolicy::Always { max_attempts, .. } => self.restart_attempts < *max_attempts,
+            RestartPolicy::OnFailure { max_attempts, .. } => {
+                self.current_state == PluginState::Failed && self.restart_attempts < *max_attempts
+            },
+        }
+    }
+
+    /// Get the restart delay based on the restart policy and attempt count.
+    pub fn get_restart_delay(&self) -> Option<Duration> {
+        if !self.should_restart() {
+            return None;
+        }
+
+        match &self.restart_policy {
+            RestartPolicy::Never => None,
+            RestartPolicy::Always { restart_delay, .. } => Some(*restart_delay),
+            RestartPolicy::OnFailure { restart_delay, backoff_multiplier, .. } => {
+                let delay = restart_delay.as_millis() as f64
+                    * backoff_multiplier.powi(self.restart_attempts as i32);
+                Some(Duration::from_millis(delay as u64))
+            },
+        }
+    }
+
+    /// Increment restart attempts and update timestamp.
+    pub fn increment_restart_attempts(&mut self) {
+        self.restart_attempts += 1;
+        self.last_restart = Some(Instant::now());
+        self.stats.restart_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Reset restart attempts (called after successful restart).
+    pub fn reset_restart_attempts(&mut self) {
+        self.restart_attempts = 0;
+        self.last_restart = None;
+    }
+
+    /// Get lifecycle statistics.
+    pub fn get_stats(&self) -> &LifecycleStats {
+        &self.stats
     }
 
     /// Get lifecycle uptime.
@@ -444,149 +363,64 @@ impl PluginLifecycle {
     }
 
     /// Get time since last restart.
-    pub fn time_since_restart(&self) -> Option<Duration> {
-        self.last_restart.map(|restart| restart.elapsed())
+    pub fn time_since_last_restart(&self) -> Option<Duration> {
+        self.last_restart.map(|restart_time| restart_time.elapsed())
     }
 
-    /// Get lifecycle statistics.
-    pub fn stats(&self) -> &LifecycleStats {
-        &self.stats
-    }
-
-    /// Reset restart attempts (useful for manual intervention).
-    pub fn reset_restart_attempts(&mut self) {
-        self.restart_attempts = 0;
-        tracing::info!(
-            plugin_id = %self.plugin_id,
-            "Reset restart attempts"
-        );
-    }
-
-    /// Update the restart policy.
-    pub fn update_restart_policy(&mut self, policy: RestartPolicy) {
-        self.restart_policy = policy;
-        tracing::info!(
-            plugin_id = %self.plugin_id,
-            policy = ?self.restart_policy,
-            "Updated restart policy"
-        );
+    /// Check if the lifecycle is healthy.
+    pub fn is_healthy(&self) -> bool {
+        !self.current_state.is_terminal() && self.restart_attempts < 10
     }
 }
 
-/// Lifecycle performance statistics.
-#[derive(Debug)]
+/// Lifecycle statistics for monitoring and debugging.
+#[derive(Debug, Default)]
 pub struct LifecycleStats {
     /// Total number of state transitions
-    total_transitions: AtomicU64,
+    pub state_transitions: AtomicU64,
 
-    /// Total number of restart attempts
-    total_restarts: AtomicU64,
+    /// Number of forced state transitions
+    pub forced_transitions: AtomicU64,
 
-    /// Total number of health checks performed
-    total_health_checks: AtomicU64,
+    /// Number of restart attempts
+    pub restart_attempts: AtomicU64,
 
-    /// Number of successful health checks
-    successful_health_checks: AtomicU64,
-
-    /// Statistics creation timestamp
-    created_at: Instant,
-}
-
-impl Clone for LifecycleStats {
-    fn clone(&self) -> Self {
-        Self {
-            total_transitions: AtomicU64::new(self.total_transitions.load(Ordering::Relaxed)),
-            total_restarts: AtomicU64::new(self.total_restarts.load(Ordering::Relaxed)),
-            total_health_checks: AtomicU64::new(self.total_health_checks.load(Ordering::Relaxed)),
-            successful_health_checks: AtomicU64::new(self.successful_health_checks.load(Ordering::Relaxed)),
-            created_at: self.created_at,
-        }
-    }
+    /// Time spent in each state (in milliseconds)
+    pub time_in_running: AtomicU64,
+    pub time_in_paused: AtomicU64,
+    pub time_in_failed: AtomicU64,
 }
 
 impl LifecycleStats {
     /// Create new lifecycle statistics.
-    fn new() -> Self {
-        Self {
-            total_transitions: AtomicU64::new(0),
-            total_restarts: AtomicU64::new(0),
-            total_health_checks: AtomicU64::new(0),
-            successful_health_checks: AtomicU64::new(0),
-            created_at: Instant::now(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Record a state transition.
-    fn record_transition(&self) {
-        self.total_transitions.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Record a restart attempt.
-    fn record_restart(&self) {
-        self.total_restarts.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Record a health check.
-    pub fn record_health_check(&self, successful: bool) {
-        self.total_health_checks.fetch_add(1, Ordering::Relaxed);
-        if successful {
-            self.successful_health_checks.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Get total number of transitions.
+    /// Get total state transitions.
     pub fn total_transitions(&self) -> u64 {
-        self.total_transitions.load(Ordering::Relaxed)
+        self.state_transitions.load(Ordering::Relaxed)
     }
 
-    /// Get total number of restarts.
-    pub fn total_restarts(&self) -> u64 {
-        self.total_restarts.load(Ordering::Relaxed)
+    /// Get total forced transitions.
+    pub fn total_forced_transitions(&self) -> u64 {
+        self.forced_transitions.load(Ordering::Relaxed)
     }
 
-    /// Get total number of health checks.
-    pub fn total_health_checks(&self) -> u64 {
-        self.total_health_checks.load(Ordering::Relaxed)
+    /// Get total restart attempts.
+    pub fn total_restart_attempts(&self) -> u64 {
+        self.restart_attempts.load(Ordering::Relaxed)
     }
 
-    /// Get health check success rate.
-    pub fn health_check_success_rate(&self) -> f64 {
-        let total = self.total_health_checks();
-        let successful = self.successful_health_checks.load(Ordering::Relaxed);
-        
-        if total > 0 {
-            (successful as f64 / total as f64) * 100.0
+    /// Check if the lifecycle has excessive forced transitions.
+    pub fn has_excessive_forced_transitions(&self) -> bool {
+        let total = self.total_transitions();
+        let forced = self.total_forced_transitions();
+
+        if total == 0 {
+            false
         } else {
-            0.0
-        }
-    }
-
-    /// Get statistics uptime.
-    pub fn uptime(&self) -> Duration {
-        self.created_at.elapsed()
-    }
-}
-
-/// Immutable snapshot of lifecycle statistics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LifecycleStatsSnapshot {
-    pub total_transitions: u64,
-    pub total_restarts: u64,
-    pub total_health_checks: u64,
-    pub successful_health_checks: u64,
-    pub health_check_success_rate: f64,
-    pub uptime_seconds: u64,
-}
-
-impl From<&LifecycleStats> for LifecycleStatsSnapshot {
-    fn from(stats: &LifecycleStats) -> Self {
-        Self {
-            total_transitions: stats.total_transitions(),
-            total_restarts: stats.total_restarts(),
-            total_health_checks: stats.total_health_checks(),
-            successful_health_checks: stats.successful_health_checks.load(Ordering::Relaxed),
-            health_check_success_rate: stats.health_check_success_rate(),
-            uptime_seconds: stats.uptime().as_secs(),
+            (forced as f64 / total as f64) > 0.1 // More than 10% forced transitions
         }
     }
 }
@@ -594,23 +428,132 @@ impl From<&LifecycleStats> for LifecycleStatsSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
-    #[test]
-    fn test_plugin_state_transitions() {
-        assert!(PluginState::Unloaded.can_transition_to(PluginState::Loading));
-        assert!(PluginState::Loading.can_transition_to(PluginState::Initializing));
-        assert!(PluginState::Initializing.can_transition_to(PluginState::Running));
-        assert!(PluginState::Running.can_transition_to(PluginState::Paused));
-        assert!(PluginState::Paused.can_transition_to(PluginState::Running));
-        assert!(PluginState::Running.can_transition_to(PluginState::Stopped));
+    #[tokio::test]
+    async fn test_lifecycle_creation() {
+        let plugin_id = Uuid::new_v4();
+        let lifecycle = PluginLifecycle::new(plugin_id, RestartPolicy::conservative());
 
-        // Invalid transitions
-        assert!(!PluginState::Unloaded.can_transition_to(PluginState::Running));
-        assert!(!PluginState::Stopped.can_transition_to(PluginState::Running));
+        assert_eq!(lifecycle.current_state().await, PluginState::Unloaded);
+        assert_eq!(lifecycle.plugin_id(), plugin_id);
+        assert!(!lifecycle.is_active().await);
+    }
+
+    #[tokio::test]
+    async fn test_valid_state_transitions() {
+        let plugin_id = Uuid::new_v4();
+        let mut lifecycle = PluginLifecycle::new(plugin_id, RestartPolicy::conservative());
+
+        // Valid transition sequence
+        lifecycle.transition_to(PluginState::Loading).await.unwrap();
+        assert_eq!(lifecycle.current_state().await, PluginState::Loading);
+
+        lifecycle.transition_to(PluginState::Initializing).await.unwrap();
+        assert_eq!(lifecycle.current_state().await, PluginState::Initializing);
+
+        lifecycle.transition_to(PluginState::Running).await.unwrap();
+        assert_eq!(lifecycle.current_state().await, PluginState::Running);
+        assert!(lifecycle.is_active().await);
+
+        lifecycle.transition_to(PluginState::Paused).await.unwrap();
+        assert_eq!(lifecycle.current_state().await, PluginState::Paused);
+        assert!(lifecycle.is_active().await);
+
+        lifecycle.transition_to(PluginState::Stopped).await.unwrap();
+        assert_eq!(lifecycle.current_state().await, PluginState::Stopped);
+        assert!(lifecycle.is_terminal().await);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_state_transitions() {
+        let plugin_id = Uuid::new_v4();
+        let mut lifecycle = PluginLifecycle::new(plugin_id, RestartPolicy::conservative());
+
+        // Invalid transition: Unloaded -> Running
+        let result = lifecycle.transition_to(PluginState::Running).await;
+        assert!(result.is_err());
+        assert_eq!(lifecycle.current_state().await, PluginState::Unloaded);
+    }
+
+    #[tokio::test]
+    async fn test_forced_transitions() {
+        let plugin_id = Uuid::new_v4();
+        let mut lifecycle = PluginLifecycle::new(plugin_id, RestartPolicy::conservative());
+
+        // Force invalid transition
+        lifecycle.force_transition_to(PluginState::Running).await;
+        assert_eq!(lifecycle.current_state().await, PluginState::Running);
+
+        let stats = lifecycle.get_stats();
+        assert_eq!(stats.total_forced_transitions(), 1);
     }
 
     #[test]
-    fn test_plugin_state_checks() {
+    fn test_restart_policies() {
+        let plugin_id = Uuid::new_v4();
+
+        // Never restart
+        let lifecycle_never = PluginLifecycle::new(plugin_id, RestartPolicy::Never);
+        assert!(!lifecycle_never.should_restart());
+
+        // Always restart
+        let lifecycle_always = PluginLifecycle::new(
+            plugin_id,
+            RestartPolicy::Always { max_attempts: 3, restart_delay: Duration::from_secs(1) },
+        );
+        assert!(lifecycle_always.should_restart());
+
+        // On failure restart
+        let mut lifecycle_failure = PluginLifecycle::new(
+            plugin_id,
+            RestartPolicy::OnFailure {
+                max_attempts: 3,
+                restart_delay: Duration::from_secs(1),
+                backoff_multiplier: 2.0,
+            },
+        );
+
+        // Not failed, so no restart
+        assert!(!lifecycle_failure.should_restart());
+
+        // Simulate failure
+        lifecycle_failure.current_state = PluginState::Failed;
+        assert!(lifecycle_failure.should_restart());
+    }
+
+    #[test]
+    fn test_restart_delay_calculation() {
+        let plugin_id = Uuid::new_v4();
+        let mut lifecycle = PluginLifecycle::new(
+            plugin_id,
+            RestartPolicy::OnFailure {
+                max_attempts: 3,
+                restart_delay: Duration::from_secs(1),
+                backoff_multiplier: 2.0,
+            },
+        );
+
+        lifecycle.current_state = PluginState::Failed;
+
+        // First attempt: 1 second
+        assert_eq!(lifecycle.get_restart_delay(), Some(Duration::from_secs(1)));
+
+        // Second attempt: 2 seconds
+        lifecycle.increment_restart_attempts();
+        assert_eq!(lifecycle.get_restart_delay(), Some(Duration::from_secs(2)));
+
+        // Third attempt: 4 seconds
+        lifecycle.increment_restart_attempts();
+        assert_eq!(lifecycle.get_restart_delay(), Some(Duration::from_secs(4)));
+
+        // Fourth attempt: should not restart
+        lifecycle.increment_restart_attempts();
+        assert_eq!(lifecycle.get_restart_delay(), None);
+    }
+
+    #[test]
+    fn test_plugin_state_properties() {
         assert!(PluginState::Running.is_active());
         assert!(PluginState::Paused.is_active());
         assert!(!PluginState::Stopped.is_active());
@@ -622,151 +565,5 @@ mod tests {
         assert!(PluginState::Stopped.is_terminal());
         assert!(PluginState::Failed.is_terminal());
         assert!(!PluginState::Running.is_terminal());
-    }
-
-    #[test]
-    fn test_restart_policy() {
-        let conservative = RestartPolicy::conservative();
-        match conservative {
-            RestartPolicy::OnFailure { max_attempts, .. } => {
-                assert_eq!(max_attempts, 3);
-            }
-            _ => panic!("Expected OnFailure policy"),
-        }
-
-        let aggressive = RestartPolicy::aggressive();
-        match aggressive {
-            RestartPolicy::Always { max_attempts, .. } => {
-                assert_eq!(max_attempts, 10);
-            }
-            _ => panic!("Expected Always policy"),
-        }
-
-        let never = RestartPolicy::never();
-        assert!(matches!(never, RestartPolicy::Never));
-    }
-
-    #[tokio::test]
-    async fn test_lifecycle_creation() {
-        let plugin_id = PluginId::new();
-        let lifecycle = PluginLifecycle::new(plugin_id, RestartPolicy::conservative());
-        
-        assert_eq!(lifecycle.current_state().await, PluginState::Unloaded);
-        assert_eq!(lifecycle.plugin_id(), plugin_id);
-        assert_eq!(lifecycle.restart_attempts(), 0);
-        assert!(lifecycle.previous_state().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_lifecycle_transitions() {
-        let plugin_id = PluginId::new();
-        let mut lifecycle = PluginLifecycle::new(plugin_id, RestartPolicy::conservative());
-
-        // Valid transition sequence
-        lifecycle.transition_to(PluginState::Loading).await.unwrap();
-        assert_eq!(lifecycle.current_state().await, PluginState::Loading);
-        assert_eq!(lifecycle.previous_state(), Some(PluginState::Unloaded));
-
-        lifecycle.transition_to(PluginState::Initializing).await.unwrap();
-        assert_eq!(lifecycle.current_state().await, PluginState::Initializing);
-
-        lifecycle.transition_to(PluginState::Running).await.unwrap();
-        assert_eq!(lifecycle.current_state().await, PluginState::Running);
-        assert!(lifecycle.is_active().await);
-
-        // Invalid transition should fail
-        let result = lifecycle.transition_to(PluginState::Unloaded).await;
-        assert!(result.is_err());
-        assert_eq!(lifecycle.current_state().await, PluginState::Running); // State unchanged
-    }
-
-    #[tokio::test]
-    async fn test_lifecycle_force_transition() {
-        let plugin_id = PluginId::new();
-        let mut lifecycle = PluginLifecycle::new(plugin_id, RestartPolicy::conservative());
-
-        // Force transition should work even if invalid
-        lifecycle.force_transition(PluginState::Running).await;
-        assert_eq!(lifecycle.current_state().await, PluginState::Running);
-        assert_eq!(lifecycle.previous_state(), Some(PluginState::Unloaded));
-    }
-
-    #[tokio::test]
-    async fn test_lifecycle_health_check() {
-        let plugin_id = PluginId::new();
-        let lifecycle = PluginLifecycle::new(plugin_id, RestartPolicy::conservative());
-
-        // Successful health check
-        let result = lifecycle
-            .health_check(|| async { Ok(true) }, Duration::from_millis(100))
-            .await;
-        assert!(result.unwrap());
-
-        // Failed health check
-        let result = lifecycle
-            .health_check(|| async { Ok(false) }, Duration::from_millis(100))
-            .await;
-        assert!(!result.unwrap());
-
-        // Timeout health check
-        let result = lifecycle
-            .health_check(
-                || async {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    Ok(true)
-                },
-                Duration::from_millis(50),
-            )
-            .await;
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_lifecycle_stats() {
-        let stats = LifecycleStats::new();
-        assert_eq!(stats.total_transitions(), 0);
-        assert_eq!(stats.total_restarts(), 0);
-        assert_eq!(stats.total_health_checks(), 0);
-        assert_eq!(stats.health_check_success_rate(), 0.0);
-
-        stats.record_transition();
-        stats.record_restart();
-        stats.record_health_check(true);
-        stats.record_health_check(false);
-        stats.record_health_check(true);
-
-        assert_eq!(stats.total_transitions(), 1);
-        assert_eq!(stats.total_restarts(), 1);
-        assert_eq!(stats.total_health_checks(), 3);
-        assert!((stats.health_check_success_rate() - 66.66666666666667).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_lifecycle_stats_snapshot() {
-        let stats = LifecycleStats::new();
-        stats.record_transition();
-        stats.record_health_check(true);
-
-        let snapshot = LifecycleStatsSnapshot::from(&stats);
-        assert_eq!(snapshot.total_transitions, 1);
-        assert_eq!(snapshot.total_health_checks, 1);
-        assert_eq!(snapshot.successful_health_checks, 1);
-        assert_eq!(snapshot.health_check_success_rate, 100.0);
-    }
-
-    #[test]
-    fn test_lifecycle_stats_clone() {
-        let stats = LifecycleStats::new();
-        stats.record_transition();
-        stats.record_restart();
-
-        let cloned_stats = stats.clone();
-        assert_eq!(cloned_stats.total_transitions(), 1);
-        assert_eq!(cloned_stats.total_restarts(), 1);
-
-        // Original and clone should be independent
-        stats.record_transition();
-        assert_eq!(stats.total_transitions(), 2);
-        assert_eq!(cloned_stats.total_transitions(), 1);
     }
 }

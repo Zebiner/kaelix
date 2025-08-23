@@ -3,1039 +3,668 @@
 //! Credit-based flow control system with pressure propagation and global system monitoring.
 //! Designed for preventing cascade failures and maintaining system stability under load.
 
-use crate::multiplexing::error::{
-    BackpressureError, BackpressureResult, FlowControlError, PropagationError, StreamId,
-};
+use crate::multiplexing::error::{MultiplexerError, StreamId};
 use crossbeam::atomic::AtomicCell;
 use dashmap::DashMap;
-use parking_lot::RwLock;
 use smallvec::SmallVec;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
 /// Default initial credits per stream
 const DEFAULT_INITIAL_CREDITS: i32 = 1000;
 
-/// Maximum credits a stream can accumulate
-const MAX_CREDITS_PER_STREAM: i32 = 10000;
+/// Minimum credits before backpressure activates
+const BACKPRESSURE_THRESHOLD: i32 = 100;
 
-/// Minimum credits before throttling
-const MIN_CREDITS_THRESHOLD: i32 = 100;
+/// Maximum credit refill rate per second
+const MAX_REFILL_RATE: u64 = 10000;
 
-/// Global pressure monitoring interval
-const PRESSURE_MONITORING_INTERVAL_MS: u64 = 100;
-
-/// Maximum propagation depth to prevent infinite loops
-const MAX_PROPAGATION_DEPTH: usize = 10;
-
-/// Backpressure levels with percentage thresholds
+/// Backpressure levels for graduated response
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum BackpressureLevel {
-    None = 0,       // 0-25% capacity utilization
-    Low = 1,        // 25-50% capacity utilization
-    Medium = 2,     // 50-75% capacity utilization
-    High = 3,       // 75-90% capacity utilization
-    Critical = 4,   // 90-100% capacity utilization
+    /// Normal operation - no backpressure
+    None = 0,
+    /// Light pressure - minor delays
+    Light = 1,
+    /// Moderate pressure - noticeable delays
+    Moderate = 2,
+    /// Heavy pressure - significant delays
+    Heavy = 3,
+    /// Critical pressure - system at risk
+    Critical = 4,
 }
 
 impl BackpressureLevel {
-    pub fn from_utilization(utilization: f64) -> Self {
-        match utilization {
-            x if x < 0.25 => BackpressureLevel::None,
-            x if x < 0.50 => BackpressureLevel::Low,
-            x if x < 0.75 => BackpressureLevel::Medium,
-            x if x < 0.90 => BackpressureLevel::High,
-            _ => BackpressureLevel::Critical,
-        }
-    }
-    
-    pub fn to_utilization(&self) -> f64 {
-        match self {
-            BackpressureLevel::None => 0.125,      // 12.5% (middle of 0-25%)
-            BackpressureLevel::Low => 0.375,       // 37.5% (middle of 25-50%)
-            BackpressureLevel::Medium => 0.625,    // 62.5% (middle of 50-75%)
-            BackpressureLevel::High => 0.825,      // 82.5% (middle of 75-90%)
-            BackpressureLevel::Critical => 0.95,   // 95% (high end of 90-100%)
-        }
-    }
-    
-    pub fn requires_throttling(&self) -> bool {
-        *self >= BackpressureLevel::Medium
-    }
-    
-    pub fn credit_multiplier(&self) -> f64 {
+    /// Returns the delay multiplier for this backpressure level
+    pub fn delay_multiplier(self) -> f64 {
         match self {
             BackpressureLevel::None => 1.0,
-            BackpressureLevel::Low => 0.9,
-            BackpressureLevel::Medium => 0.7,
-            BackpressureLevel::High => 0.5,
-            BackpressureLevel::Critical => 0.2,
+            BackpressureLevel::Light => 1.2,
+            BackpressureLevel::Moderate => 1.5,
+            BackpressureLevel::Heavy => 2.0,
+            BackpressureLevel::Critical => 3.0,
+        }
+    }
+
+    /// Returns the credit consumption multiplier for this level
+    pub fn credit_multiplier(self) -> f64 {
+        match self {
+            BackpressureLevel::None => 1.0,
+            BackpressureLevel::Light => 1.1,
+            BackpressureLevel::Moderate => 1.3,
+            BackpressureLevel::Heavy => 1.6,
+            BackpressureLevel::Critical => 2.0,
         }
     }
 }
 
-/// Per-stream backpressure state
-#[derive(Debug)]
-pub struct BackpressureState {
-    pub level: AtomicCell<BackpressureLevel>,
-    pub credits: AtomicI32,
-    pub queue_depth: AtomicUsize,
-    pub processing_rate: AtomicCell<f64>, // Messages per second
-    pub last_updated: AtomicU64,
-    pub credit_limit: AtomicI32,
-    pub throttle_start: AtomicU64,
-    pub pressure_score: AtomicCell<f64>,
-}
-
-impl BackpressureState {
-    pub fn new(initial_credits: i32) -> Self {
-        Self {
-            level: AtomicCell::new(BackpressureLevel::None),
-            credits: AtomicI32::new(initial_credits),
-            queue_depth: AtomicUsize::new(0),
-            processing_rate: AtomicCell::new(0.0),
-            last_updated: AtomicU64::new(Self::current_time_ns()),
-            credit_limit: AtomicI32::new(MAX_CREDITS_PER_STREAM),
-            throttle_start: AtomicU64::new(0),
-            pressure_score: AtomicCell::new(0.0),
-        }
-    }
-    
-    fn current_time_ns() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64
-    }
-    
-    pub fn get_level(&self) -> BackpressureLevel {
-        self.level.load()
-    }
-    
-    pub fn set_level(&self, level: BackpressureLevel) {
-        self.level.store(level);
-        self.last_updated.store(Self::current_time_ns(), Ordering::Relaxed);
-        
-        if level.requires_throttling() && self.throttle_start.load(Ordering::Relaxed) == 0 {
-            self.throttle_start.store(Self::current_time_ns(), Ordering::Relaxed);
-        } else if !level.requires_throttling() {
-            self.throttle_start.store(0, Ordering::Relaxed);
-        }
-    }
-    
-    pub fn get_credits(&self) -> i32 {
-        self.credits.load(Ordering::Acquire)
-    }
-    
-    pub fn set_credits(&self, credits: i32) {
-        let limit = self.credit_limit.load(Ordering::Relaxed);
-        let bounded_credits = credits.min(limit).max(0);
-        self.credits.store(bounded_credits, Ordering::Release);
-    }
-    
-    pub fn add_credits(&self, count: i32) -> i32 {
-        let limit = self.credit_limit.load(Ordering::Relaxed);
-        let new_credits = self.credits.fetch_add(count, Ordering::AcqRel) + count;
-        
-        if new_credits > limit {
-            let excess = new_credits - limit;
-            self.credits.fetch_sub(excess, Ordering::AcqRel);
-            limit
-        } else {
-            new_credits
-        }
-    }
-    
-    pub fn try_consume_credits(&self, count: i32) -> bool {
-        let current = self.credits.load(Ordering::Acquire);
-        if current < count {
-            return false;
-        }
-        
-        self.credits
-            .compare_exchange(current, current - count, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    }
-    
-    pub fn update_queue_depth(&self, depth: usize) {
-        self.queue_depth.store(depth, Ordering::Relaxed);
-        self.update_pressure_score();
-    }
-    
-    pub fn update_processing_rate(&self, rate: f64) {
-        self.processing_rate.store(rate);
-        self.update_pressure_score();
-    }
-    
-    fn update_pressure_score(&self) {
-        let queue_depth = self.queue_depth.load(Ordering::Relaxed) as f64;
-        let processing_rate = self.processing_rate.load();
-        let credits = self.credits.load(Ordering::Relaxed) as f64;
-        let credit_limit = self.credit_limit.load(Ordering::Relaxed) as f64;
-        
-        // Calculate pressure score (0.0 = no pressure, 1.0 = maximum pressure)
-        let queue_pressure = (queue_depth / 1000.0).min(1.0); // Assume 1000 is high queue depth
-        let credit_pressure = 1.0 - (credits / credit_limit);
-        let rate_pressure = if processing_rate > 0.0 {
-            (queue_depth / (processing_rate * 10.0)).min(1.0) // 10 seconds to clear queue
-        } else {
-            1.0
-        };
-        
-        let combined_pressure = (queue_pressure * 0.4 + credit_pressure * 0.3 + rate_pressure * 0.3);
-        self.pressure_score.store(combined_pressure);
-        
-        // Update backpressure level based on pressure score
-        let new_level = BackpressureLevel::from_utilization(combined_pressure);
-        self.set_level(new_level);
-    }
-    
-    pub fn get_pressure_score(&self) -> f64 {
-        self.pressure_score.load()
-    }
-    
-    pub fn is_throttling(&self) -> bool {
-        self.get_level().requires_throttling()
-    }
-    
-    pub fn get_throttle_duration_ms(&self) -> u64 {
-        let start = self.throttle_start.load(Ordering::Relaxed);
-        if start == 0 {
-            return 0;
-        }
-        
-        let current = Self::current_time_ns();
-        ((current - start) / 1_000_000).max(0) // Convert to milliseconds
-    }
-}
-
-/// Global system pressure state
-#[derive(Debug, Clone)]
-pub struct GlobalPressureState {
-    pub overall_level: BackpressureLevel,
-    pub active_streams: usize,
-    pub throttled_streams: usize,
-    pub total_credits: i64,
-    pub average_pressure_score: f64,
-    pub memory_pressure: f64,
-    pub cpu_pressure: f64,
-    pub network_pressure: f64,
-    pub last_updated: Instant,
-}
-
-impl GlobalPressureState {
-    pub fn new() -> Self {
-        Self {
-            overall_level: BackpressureLevel::None,
-            active_streams: 0,
-            throttled_streams: 0,
-            total_credits: 0,
-            average_pressure_score: 0.0,
-            memory_pressure: 0.0,
-            cpu_pressure: 0.0,
-            network_pressure: 0.0,
-            last_updated: Instant::now(),
-        }
-    }
-    
-    pub fn is_healthy(&self) -> bool {
-        self.overall_level < BackpressureLevel::Critical &&
-        self.average_pressure_score < 0.8 &&
-        self.memory_pressure < 0.9 &&
-        self.cpu_pressure < 0.9
-    }
-    
-    pub fn requires_global_throttling(&self) -> bool {
-        self.overall_level >= BackpressureLevel::High ||
-        self.memory_pressure > 0.85 ||
-        self.cpu_pressure > 0.85
-    }
-}
-
-/// Stream dependency graph for pressure propagation
-#[derive(Debug)]
-pub struct PropagationGraph {
-    pub dependencies: DashMap<StreamId, SmallVec<[StreamId; 4]>>, // Stream -> dependencies
-    pub dependents: DashMap<StreamId, SmallVec<[StreamId; 4]>>,   // Stream -> dependents
-    pub propagation_weights: DashMap<(StreamId, StreamId), f64>,  // Edge weights
-}
-
-impl PropagationGraph {
-    pub fn new() -> Self {
-        Self {
-            dependencies: DashMap::new(),
-            dependents: DashMap::new(),
-            propagation_weights: DashMap::new(),
-        }
-    }
-    
-    pub fn add_dependency(&self, dependent: StreamId, dependency: StreamId, weight: f64) {
-        // Add to dependencies map
-        self.dependencies
-            .entry(dependent)
-            .or_insert_with(SmallVec::new)
-            .push(dependency);
-        
-        // Add to dependents map
-        self.dependents
-            .entry(dependency)
-            .or_insert_with(SmallVec::new)
-            .push(dependent);
-        
-        // Store propagation weight
-        self.propagation_weights.insert((dependent, dependency), weight);
-    }
-    
-    pub fn remove_dependency(&self, dependent: StreamId, dependency: StreamId) {
-        // Remove from dependencies map
-        if let Some(mut deps) = self.dependencies.get_mut(&dependent) {
-            deps.retain(|&id| id != dependency);
-        }
-        
-        // Remove from dependents map
-        if let Some(mut deps) = self.dependents.get_mut(&dependency) {
-            deps.retain(|&id| id != dependent);
-        }
-        
-        // Remove propagation weight
-        self.propagation_weights.remove(&(dependent, dependency));
-    }
-    
-    pub fn get_dependencies(&self, stream_id: StreamId) -> Vec<StreamId> {
-        self.dependencies
-            .get(&stream_id)
-            .map(|deps| deps.iter().copied().collect())
-            .unwrap_or_default()
-    }
-    
-    pub fn get_dependents(&self, stream_id: StreamId) -> Vec<StreamId> {
-        self.dependents
-            .get(&stream_id)
-            .map(|deps| deps.iter().copied().collect())
-            .unwrap_or_default()
-    }
-    
-    pub fn get_propagation_weight(&self, dependent: StreamId, dependency: StreamId) -> f64 {
-        self.propagation_weights
-            .get(&(dependent, dependency))
-            .map(|weight| *weight)
-            .unwrap_or(1.0) // Default weight
-    }
-}
-
-/// Credit-based flow controller
-#[derive(Debug)]
-pub struct FlowController {
-    pub default_credits: i32,
-    pub credit_refresh_rate: f64, // Credits per second
-    pub burst_allowance: i32,
-    pub decay_rate: f64, // Rate at which unused credits decay
-}
-
-impl FlowController {
-    pub fn new() -> Self {
-        Self {
-            default_credits: DEFAULT_INITIAL_CREDITS,
-            credit_refresh_rate: 100.0, // 100 credits per second
-            burst_allowance: 500,
-            decay_rate: 0.1, // 10% decay per second for unused credits
-        }
-    }
-    
-    pub fn allocate_initial_credits(&self, stream_id: StreamId) -> i32 {
-        // Could use stream_id for per-stream customization
-        let _ = stream_id;
-        self.default_credits
-    }
-    
-    pub fn calculate_credit_refresh(&self, elapsed_ms: u64, current_level: BackpressureLevel) -> i32 {
-        let elapsed_secs = elapsed_ms as f64 / 1000.0;
-        let base_refresh = (self.credit_refresh_rate * elapsed_secs) as i32;
-        let multiplier = current_level.credit_multiplier();
-        (base_refresh as f64 * multiplier) as i32
-    }
-    
-    pub fn should_throttle(&self, state: &BackpressureState) -> bool {
-        state.get_credits() < MIN_CREDITS_THRESHOLD ||
-        state.get_level().requires_throttling()
-    }
-    
-    pub fn get_throttle_delay_ms(&self, state: &BackpressureState) -> u64 {
-        match state.get_level() {
-            BackpressureLevel::None | BackpressureLevel::Low => 0,
-            BackpressureLevel::Medium => 1,
-            BackpressureLevel::High => 5,
-            BackpressureLevel::Critical => 10,
-        }
-    }
-}
-
-/// Backpressure management metrics
-#[derive(Debug, Default)]
-pub struct BackpressureMetrics {
-    pub credit_allocations: AtomicU64,
-    pub credit_consumptions: AtomicU64,
-    pub throttle_events: AtomicU64,
-    pub pressure_propagations: AtomicU64,
-    pub global_pressure_events: AtomicU64,
-    pub flow_control_violations: AtomicU64,
-    pub credit_refreshes: AtomicU64,
-    pub total_credits_allocated: AtomicU64,
-    pub total_credits_consumed: AtomicU64,
-    pub average_pressure_score: AtomicCell<f64>,
-}
-
-impl BackpressureMetrics {
-    pub fn record_credit_allocation(&self, credits: i32) {
-        self.credit_allocations.fetch_add(1, Ordering::Relaxed);
-        self.total_credits_allocated.fetch_add(credits as u64, Ordering::Relaxed);
-    }
-    
-    pub fn record_credit_consumption(&self, credits: i32) {
-        self.credit_consumptions.fetch_add(1, Ordering::Relaxed);
-        self.total_credits_consumed.fetch_add(credits as u64, Ordering::Relaxed);
-    }
-    
-    pub fn record_throttle_event(&self) {
-        self.throttle_events.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    pub fn record_pressure_propagation(&self) {
-        self.pressure_propagations.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    pub fn record_global_pressure_event(&self) {
-        self.global_pressure_events.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    pub fn record_flow_violation(&self) {
-        self.flow_control_violations.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    pub fn record_credit_refresh(&self) {
-        self.credit_refreshes.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    pub fn update_average_pressure(&self, pressure: f64) {
-        self.average_pressure_score.store(pressure);
-    }
-    
-    pub fn get_credit_utilization_rate(&self) -> f64 {
-        let allocated = self.total_credits_allocated.load(Ordering::Relaxed) as f64;
-        let consumed = self.total_credits_consumed.load(Ordering::Relaxed) as f64;
-        if allocated == 0.0 {
-            return 0.0;
-        }
-        consumed / allocated
-    }
-    
-    pub fn get_throttle_rate(&self) -> f64 {
-        let throttles = self.throttle_events.load(Ordering::Relaxed) as f64;
-        let allocations = self.credit_allocations.load(Ordering::Relaxed) as f64;
-        if allocations == 0.0 {
-            return 0.0;
-        }
-        throttles / allocations
-    }
-}
-
-/// Backpressure manager configuration
+/// Backpressure configuration
 #[derive(Debug, Clone)]
 pub struct BackpressureConfig {
-    pub default_credits: i32,
-    pub max_credits_per_stream: i32,
-    pub credit_refresh_interval_ms: u64,
-    pub pressure_monitoring_interval_ms: u64,
-    pub enable_global_monitoring: bool,
-    pub enable_pressure_propagation: bool,
-    pub propagation_depth_limit: usize,
-    pub throttle_threshold: f64,
-    pub burst_allowance: i32,
+    /// Initial credits per stream
+    pub initial_credits: i32,
+    /// Minimum credits before backpressure
+    pub backpressure_threshold: i32,
+    /// Maximum credit refill rate per second
+    pub max_refill_rate: u64,
+    /// Enable adaptive backpressure
+    pub adaptive_enabled: bool,
+    /// Pressure propagation enabled
+    pub propagation_enabled: bool,
+    /// Global monitoring enabled
+    pub global_monitoring: bool,
+    /// Credit refill interval in milliseconds
+    pub refill_interval_ms: u64,
+}
+
+impl BackpressureConfig {
+    /// Adaptive backpressure configuration
+    pub fn adaptive() -> Self {
+        Self {
+            initial_credits: 2000,
+            backpressure_threshold: 200,
+            max_refill_rate: 20000,
+            adaptive_enabled: true,
+            propagation_enabled: true,
+            global_monitoring: true,
+            refill_interval_ms: 10,
+        }
+    }
+
+    /// Conservative backpressure configuration
+    pub fn conservative() -> Self {
+        Self {
+            initial_credits: 500,
+            backpressure_threshold: 50,
+            max_refill_rate: 5000,
+            adaptive_enabled: false,
+            propagation_enabled: false,
+            global_monitoring: false,
+            refill_interval_ms: 100,
+        }
+    }
 }
 
 impl Default for BackpressureConfig {
     fn default() -> Self {
-        Self {
-            default_credits: DEFAULT_INITIAL_CREDITS,
-            max_credits_per_stream: MAX_CREDITS_PER_STREAM,
-            credit_refresh_interval_ms: 100,
-            pressure_monitoring_interval_ms: PRESSURE_MONITORING_INTERVAL_MS,
-            enable_global_monitoring: true,
-            enable_pressure_propagation: true,
-            propagation_depth_limit: MAX_PROPAGATION_DEPTH,
-            throttle_threshold: 0.7,
-            burst_allowance: 500,
+        Self::adaptive()
+    }
+}
+
+/// Flow control metrics for monitoring
+#[derive(Debug, Default)]
+pub struct BackpressureMetrics {
+    /// Total backpressure events
+    pub backpressure_events: AtomicU64,
+    /// Credits consumed
+    pub credits_consumed: AtomicU64,
+    /// Credits refilled
+    pub credits_refilled: AtomicU64,
+    /// Streams under backpressure
+    pub streams_under_pressure: AtomicUsize,
+    /// Pressure propagation events
+    pub propagation_events: AtomicU64,
+    /// Critical pressure events
+    pub critical_pressure_events: AtomicU64,
+}
+
+impl BackpressureMetrics {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Gets the current backpressure ratio
+    pub fn backpressure_ratio(&self) -> f64 {
+        let total_events = self.backpressure_events.load(Ordering::Relaxed);
+        let critical_events = self.critical_pressure_events.load(Ordering::Relaxed);
+
+        if total_events > 0 {
+            critical_events as f64 / total_events as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Gets credit efficiency (refilled / consumed)
+    pub fn credit_efficiency(&self) -> f64 {
+        let consumed = self.credits_consumed.load(Ordering::Relaxed);
+        let refilled = self.credits_refilled.load(Ordering::Relaxed);
+
+        if consumed > 0 {
+            refilled as f64 / consumed as f64
+        } else {
+            1.0
         }
     }
 }
 
-/// Sophisticated Backpressure Manager
+/// Per-stream credit tracking
 #[derive(Debug)]
+struct StreamCreditState {
+    /// Available credits
+    credits: AtomicI32,
+    /// Last refill timestamp
+    last_refill: AtomicCell<Instant>,
+    /// Backpressure level
+    pressure_level: AtomicCell<BackpressureLevel>,
+    /// Total credits consumed
+    total_consumed: AtomicU64,
+    /// Total credits refilled
+    total_refilled: AtomicU64,
+}
+
+impl StreamCreditState {
+    fn new(initial_credits: i32) -> Self {
+        Self {
+            credits: AtomicI32::new(initial_credits),
+            last_refill: AtomicCell::new(Instant::now()),
+            pressure_level: AtomicCell::new(BackpressureLevel::None),
+            total_consumed: AtomicU64::new(0),
+            total_refilled: AtomicU64::new(0),
+        }
+    }
+
+    /// Attempts to consume credits
+    fn try_consume(&self, amount: i32) -> Result<i32, MultiplexerError> {
+        let current = self.credits.fetch_sub(amount, Ordering::AcqRel);
+        if current < amount {
+            // Insufficient credits - restore
+            self.credits.fetch_add(amount, Ordering::Relaxed);
+            Err(MultiplexerError::Backpressure(format!(
+                "Insufficient credits: {} available, {} required",
+                current, amount
+            )))
+        } else {
+            self.total_consumed.fetch_add(amount as u64, Ordering::Relaxed);
+            Ok(current - amount)
+        }
+    }
+
+    /// Refills credits based on elapsed time
+    fn refill_credits(&self, max_refill_rate: u64) {
+        let now = Instant::now();
+        let last_refill = self.last_refill.swap(now);
+        let elapsed = now.duration_since(last_refill);
+
+        // Calculate refill amount based on elapsed time
+        let refill_amount = ((elapsed.as_millis() as u64 * max_refill_rate) / 1000) as i32;
+
+        if refill_amount > 0 {
+            // Add credits but don't exceed the initial amount
+            let current = self.credits.load(Ordering::Relaxed);
+            let new_credits = std::cmp::min(current + refill_amount, DEFAULT_INITIAL_CREDITS);
+            let actual_refill = new_credits - current;
+
+            if actual_refill > 0 {
+                self.credits.store(new_credits, Ordering::Release);
+                self.total_refilled.fetch_add(actual_refill as u64, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Updates pressure level based on current credits
+    fn update_pressure_level(&self, threshold: i32) -> BackpressureLevel {
+        let credits = self.credits.load(Ordering::Relaxed);
+        let level = if credits <= 0 {
+            BackpressureLevel::Critical
+        } else if credits < threshold / 4 {
+            BackpressureLevel::Heavy
+        } else if credits < threshold / 2 {
+            BackpressureLevel::Moderate
+        } else if credits < threshold {
+            BackpressureLevel::Light
+        } else {
+            BackpressureLevel::None
+        };
+
+        self.pressure_level.store(level);
+        level
+    }
+
+    /// Gets current pressure level
+    fn pressure_level(&self) -> BackpressureLevel {
+        self.pressure_level.load()
+    }
+}
+
+/// Backpressure propagation graph
+#[derive(Debug, Default)]
+struct PropagationGraph {
+    /// Upstream dependencies for each stream
+    upstream: DashMap<StreamId, HashSet<StreamId>>,
+    /// Downstream dependents for each stream
+    downstream: DashMap<StreamId, HashSet<StreamId>>,
+}
+
+impl PropagationGraph {
+    /// Adds a dependency relationship
+    fn add_dependency(&self, downstream_id: StreamId, upstream_id: StreamId) {
+        // Add to upstream map
+        self.upstream
+            .entry(downstream_id)
+            .or_insert_with(HashSet::new)
+            .insert(upstream_id);
+
+        // Add to downstream map
+        self.downstream
+            .entry(upstream_id)
+            .or_insert_with(HashSet::new)
+            .insert(downstream_id);
+    }
+
+    /// Gets all streams that should be affected by backpressure from this stream
+    fn get_propagation_targets(&self, stream_id: StreamId) -> SmallVec<[StreamId; 8]> {
+        let mut targets = SmallVec::new();
+
+        // Propagate to upstream (producers should slow down)
+        if let Some(upstream_streams) = self.upstream.get(&stream_id) {
+            targets.extend(upstream_streams.iter().copied());
+        }
+
+        targets
+    }
+
+    /// Removes a stream from the propagation graph
+    fn remove_stream(&self, stream_id: StreamId) {
+        // Remove from upstream relationships
+        if let Some((_, upstream_streams)) = self.upstream.remove(&stream_id) {
+            for upstream_id in upstream_streams {
+                if let Some(mut downstream_set) = self.downstream.get_mut(&upstream_id) {
+                    downstream_set.remove(&stream_id);
+                }
+            }
+        }
+
+        // Remove from downstream relationships
+        if let Some((_, downstream_streams)) = self.downstream.remove(&stream_id) {
+            for downstream_id in downstream_streams {
+                if let Some(mut upstream_set) = self.upstream.get_mut(&downstream_id) {
+                    upstream_set.remove(&stream_id);
+                }
+            }
+        }
+    }
+}
+
+/// Sophisticated backpressure management system
 pub struct BackpressureManager {
-    /// Per-stream backpressure state
-    stream_pressure: DashMap<StreamId, Arc<BackpressureState>>,
-    /// Global system pressure monitoring
-    global_pressure: Arc<AtomicCell<GlobalPressureState>>,
+    /// Per-stream credit state
+    stream_states: DashMap<StreamId, Arc<StreamCreditState>>,
+
     /// Pressure propagation graph
-    propagation_graph: Arc<PropagationGraph>,
-    /// Credit-based flow controller
-    flow_controller: Arc<FlowController>,
-    /// Backpressure metrics
-    metrics: BackpressureMetrics,
+    propagation_graph: PropagationGraph,
+
     /// Configuration
     config: BackpressureConfig,
-    /// Last global pressure update
-    last_global_update: AtomicU64,
+
+    /// Performance metrics
+    metrics: BackpressureMetrics,
+
+    /// Global backpressure level
+    global_pressure: AtomicCell<BackpressureLevel>,
+
+    /// Pending refill queue
+    refill_queue: Arc<parking_lot::Mutex<VecDeque<StreamId>>>,
+
+    /// Creation timestamp
+    created_at: Instant,
+}
+
+impl std::fmt::Debug for BackpressureManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackpressureManager")
+            .field("config", &self.config)
+            .field("metrics", &self.metrics)
+            .field("global_pressure", &self.global_pressure.load())
+            .field("stream_count", &self.stream_states.len())
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 impl BackpressureManager {
-    /// Create a new backpressure manager
+    /// Creates a new backpressure manager
     pub fn new(config: BackpressureConfig) -> Self {
         Self {
-            stream_pressure: DashMap::new(),
-            global_pressure: Arc::new(AtomicCell::new(GlobalPressureState::new())),
-            propagation_graph: Arc::new(PropagationGraph::new()),
-            flow_controller: Arc::new(FlowController::new()),
-            metrics: BackpressureMetrics::default(),
+            stream_states: DashMap::new(),
+            propagation_graph: PropagationGraph::default(),
             config,
-            last_global_update: AtomicU64::new(BackpressureState::current_time_ns()),
+            metrics: BackpressureMetrics::new(),
+            global_pressure: AtomicCell::new(BackpressureLevel::None),
+            refill_queue: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
+            created_at: Instant::now(),
         }
     }
-    
-    /// Allocate credits to a stream
-    pub async fn allocate_credits(&self, stream_id: StreamId, count: i32) -> Result<(), FlowControlError> {
-        let state = self.get_or_create_stream_state(stream_id);
-        
-        // Check if allocation would exceed limits
-        let current_credits = state.get_credits();
-        let credit_limit = state.credit_limit.load(Ordering::Relaxed);
-        
-        if current_credits + count > credit_limit {
-            return Err(FlowControlError::AllocationFailed { stream_id });
+
+    /// Registers a stream for backpressure management
+    pub fn register_stream(&self, stream_id: StreamId) -> Result<(), MultiplexerError> {
+        if self.stream_states.contains_key(&stream_id) {
+            return Err(MultiplexerError::Stream(format!(
+                "Stream {} already registered for backpressure management",
+                stream_id
+            )));
         }
-        
-        state.add_credits(count);
-        self.metrics.record_credit_allocation(count);
-        
+
+        let state = Arc::new(StreamCreditState::new(self.config.initial_credits));
+        self.stream_states.insert(stream_id, state);
+
         Ok(())
     }
-    
-    /// Consume credits from a stream
-    pub async fn consume_credits(&self, stream_id: StreamId, count: i32) -> Result<bool, FlowControlError> {
-        let state = self.get_or_create_stream_state(stream_id);
-        
-        // Try to consume credits atomically
-        if state.try_consume_credits(count) {
-            self.metrics.record_credit_consumption(count);
-            
-            // Update stream activity
-            state.update_queue_depth(state.queue_depth.load(Ordering::Relaxed).saturating_sub(1));
-            
-            Ok(true)
-        } else {
-            // Insufficient credits
-            self.metrics.record_flow_violation();
-            
-            // Check if this should trigger throttling
-            if self.flow_controller.should_throttle(&state) {
-                self.metrics.record_throttle_event();
-            }
-            
-            Ok(false)
-        }
-    }
-    
-    /// Get available credits for a stream
-    pub fn get_available_credits(&self, stream_id: StreamId) -> i32 {
-        if let Some(state) = self.stream_pressure.get(&stream_id) {
-            state.get_credits()
-        } else {
-            0
-        }
-    }
-    
-    /// Report pressure level for a stream
-    pub async fn report_pressure(&self, stream_id: StreamId, level: BackpressureLevel) -> BackpressureResult<()> {
-        let state = self.get_or_create_stream_state(stream_id);
-        let old_level = state.get_level();
-        
-        state.set_level(level);
-        
-        // Trigger pressure propagation if level increased significantly
-        if level > old_level && level >= BackpressureLevel::Medium {
-            if self.config.enable_pressure_propagation {
-                self.propagate_pressure(stream_id).await?;
-            }
-        }
-        
-        // Update global pressure monitoring
-        if self.config.enable_global_monitoring {
-            self.update_global_pressure().await;
-        }
-        
+
+    /// Unregisters a stream
+    pub fn unregister_stream(&self, stream_id: StreamId) -> Result<(), MultiplexerError> {
+        self.stream_states.remove(&stream_id);
+        self.propagation_graph.remove_stream(stream_id);
+
         Ok(())
     }
-    
-    /// Propagate pressure to dependent streams
-    pub async fn propagate_pressure(&self, stream_id: StreamId) -> Result<(), PropagationError> {
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        
-        queue.push_back((stream_id, 0u32)); // (stream_id, depth)
-        visited.insert(stream_id);
-        
-        while let Some((current_stream, depth)) = queue.pop_front() {
-            if depth >= self.config.propagation_depth_limit as u32 {
-                return Err(PropagationError::DepthExceeded {
-                    depth: depth as usize,
-                    max: self.config.propagation_depth_limit,
-                });
-            }
-            
-            // Get dependents of current stream
-            let dependents = self.propagation_graph.get_dependents(current_stream);
-            
-            for dependent in dependents {
-                if visited.contains(&dependent) {
-                    continue; // Avoid cycles
+
+    /// Attempts to consume credits for a stream
+    pub fn try_consume_credits(
+        &self,
+        stream_id: StreamId,
+        amount: i32,
+    ) -> Result<(), MultiplexerError> {
+        // Get or create stream state
+        let state = match self.stream_states.get(&stream_id) {
+            Some(state) => state.clone(),
+            None => {
+                // Auto-register stream
+                let state = Arc::new(StreamCreditState::new(self.config.initial_credits));
+                self.stream_states.insert(stream_id, state.clone());
+                state
+            },
+        };
+
+        // Apply backpressure multiplier
+        let pressure_level = state.pressure_level();
+        let effective_amount = (amount as f64 * pressure_level.credit_multiplier()) as i32;
+
+        // Try to consume credits
+        match state.try_consume(effective_amount) {
+            Ok(_) => {
+                self.metrics
+                    .credits_consumed
+                    .fetch_add(effective_amount as u64, Ordering::Relaxed);
+                Ok(())
+            },
+            Err(e) => {
+                // Update pressure level
+                let new_level = state.update_pressure_level(self.config.backpressure_threshold);
+
+                // Increment backpressure metrics
+                self.metrics.backpressure_events.fetch_add(1, Ordering::Relaxed);
+                if new_level == BackpressureLevel::Critical {
+                    self.metrics.critical_pressure_events.fetch_add(1, Ordering::Relaxed);
                 }
-                
-                visited.insert(dependent);
-                
-                // Calculate propagated pressure
-                let weight = self.propagation_graph.get_propagation_weight(dependent, current_stream);
-                let source_state = self.get_or_create_stream_state(current_stream);
-                let source_pressure = source_state.get_pressure_score();
-                
-                let propagated_pressure = source_pressure * weight * 0.8; // Damping factor
-                
-                // Apply pressure to dependent stream
-                if propagated_pressure > 0.3 { // Threshold for propagation
-                    let dependent_state = self.get_or_create_stream_state(dependent);
-                    let current_pressure = dependent_state.get_pressure_score();
-                    let new_pressure = (current_pressure + propagated_pressure).min(1.0);
-                    
-                    let new_level = BackpressureLevel::from_utilization(new_pressure);
-                    dependent_state.set_level(new_level);
-                    
-                    // Continue propagation
-                    queue.push_back((dependent, depth + 1));
+
+                // Propagate backpressure if enabled
+                if self.config.propagation_enabled {
+                    self.propagate_backpressure(stream_id, new_level);
                 }
-            }
+
+                // Update global pressure
+                self.update_global_pressure();
+
+                Err(e)
+            },
         }
-        
-        self.metrics.record_pressure_propagation();
-        Ok(())
     }
-    
-    /// Get global pressure state
-    pub fn get_global_pressure(&self) -> GlobalPressureState {
+
+    /// Adds credits to a stream
+    pub fn add_credits(&self, stream_id: StreamId, amount: i32) -> Result<(), MultiplexerError> {
+        if let Some(state) = self.stream_states.get(&stream_id) {
+            state.credits.fetch_add(amount, Ordering::Relaxed);
+            state.total_refilled.fetch_add(amount as u64, Ordering::Relaxed);
+            self.metrics.credits_refilled.fetch_add(amount as u64, Ordering::Relaxed);
+
+            // Update pressure level
+            state.update_pressure_level(self.config.backpressure_threshold);
+
+            Ok(())
+        } else {
+            Err(MultiplexerError::Stream(format!("Stream {} not found", stream_id)))
+        }
+    }
+
+    /// Adds a dependency relationship for pressure propagation
+    pub fn add_dependency(&self, downstream_id: StreamId, upstream_id: StreamId) {
+        self.propagation_graph.add_dependency(downstream_id, upstream_id);
+    }
+
+    /// Gets current backpressure level for a stream
+    pub fn get_pressure_level(&self, stream_id: StreamId) -> BackpressureLevel {
+        self.stream_states
+            .get(&stream_id)
+            .map(|state| state.pressure_level())
+            .unwrap_or(BackpressureLevel::None)
+    }
+
+    /// Gets global backpressure level
+    pub fn current_level(&self) -> BackpressureLevel {
         self.global_pressure.load()
     }
-    
-    /// Update global pressure monitoring
-    async fn update_global_pressure(&self) {
-        let now = BackpressureState::current_time_ns();
-        let last_update = self.last_global_update.load(Ordering::Relaxed);
-        
-        // Check if enough time has passed
-        let interval_ns = self.config.pressure_monitoring_interval_ms * 1_000_000;
-        if now - last_update < interval_ns {
+
+    /// Performs periodic credit refill
+    pub fn refill_credits(&self) {
+        for entry in self.stream_states.iter() {
+            let state = entry.value();
+            state.refill_credits(self.config.max_refill_rate);
+
+            // Update pressure level after refill
+            state.update_pressure_level(self.config.backpressure_threshold);
+        }
+
+        // Update global pressure after refills
+        self.update_global_pressure();
+    }
+
+    /// Propagates backpressure to related streams
+    fn propagate_backpressure(&self, source_stream: StreamId, pressure_level: BackpressureLevel) {
+        if pressure_level == BackpressureLevel::None {
             return;
         }
-        
-        self.last_global_update.store(now, Ordering::Relaxed);
-        
-        // Collect global statistics
-        let mut total_pressure = 0.0;
-        let mut active_streams = 0;
-        let mut throttled_streams = 0;
-        let mut total_credits = 0i64;
-        
-        for entry in self.stream_pressure.iter() {
-            let state = entry.value();
-            let pressure = state.get_pressure_score();
-            let credits = state.get_credits();
-            
-            total_pressure += pressure;
-            active_streams += 1;
-            total_credits += credits as i64;
-            
-            if state.is_throttling() {
-                throttled_streams += 1;
+
+        let targets = self.propagation_graph.get_propagation_targets(source_stream);
+
+        for target_stream in targets {
+            if let Some(state) = self.stream_states.get(&target_stream) {
+                // Apply proportional pressure
+                let current_pressure = state.pressure_level();
+                let new_pressure = std::cmp::max(current_pressure, pressure_level);
+                state.pressure_level.store(new_pressure);
+
+                self.metrics.propagation_events.fetch_add(1, Ordering::Relaxed);
             }
         }
-        
-        let average_pressure = if active_streams > 0 {
-            total_pressure / active_streams as f64
+    }
+
+    /// Updates global pressure level based on individual streams
+    fn update_global_pressure(&self) {
+        let mut pressure_counts = [0usize; 5]; // Count for each pressure level
+
+        for entry in self.stream_states.iter() {
+            let level = entry.value().pressure_level() as usize;
+            pressure_counts[level] += 1;
+        }
+
+        let total_streams = self.stream_states.len();
+        if total_streams == 0 {
+            self.global_pressure.store(BackpressureLevel::None);
+            return;
+        }
+
+        // Determine global level based on distribution
+        let critical_ratio = pressure_counts[4] as f64 / total_streams as f64;
+        let heavy_ratio = pressure_counts[3] as f64 / total_streams as f64;
+        let moderate_ratio = pressure_counts[2] as f64 / total_streams as f64;
+
+        let global_level = if critical_ratio > 0.1 {
+            BackpressureLevel::Critical
+        } else if heavy_ratio > 0.2 {
+            BackpressureLevel::Heavy
+        } else if moderate_ratio > 0.3 {
+            BackpressureLevel::Moderate
+        } else if pressure_counts[1] > 0 {
+            BackpressureLevel::Light
         } else {
-            0.0
+            BackpressureLevel::None
         };
-        
-        let overall_level = BackpressureLevel::from_utilization(average_pressure);
-        
-        // Update global state
-        let global_state = GlobalPressureState {
-            overall_level,
-            active_streams,
-            throttled_streams,
-            total_credits,
-            average_pressure_score: average_pressure,
-            memory_pressure: self.estimate_memory_pressure(),
-            cpu_pressure: self.estimate_cpu_pressure(),
-            network_pressure: self.estimate_network_pressure(),
-            last_updated: Instant::now(),
-        };
-        
-        self.global_pressure.store(global_state);
-        self.metrics.update_average_pressure(average_pressure);
-        
-        if overall_level >= BackpressureLevel::High {
-            self.metrics.record_global_pressure_event();
+
+        self.global_pressure.store(global_level);
+
+        // Update metrics
+        self.metrics
+            .streams_under_pressure
+            .store(total_streams - pressure_counts[0], Ordering::Relaxed);
+    }
+
+    /// Gets current metrics snapshot
+    pub fn get_metrics(&self) -> BackpressureMetricsSnapshot {
+        BackpressureMetricsSnapshot {
+            backpressure_events: self.metrics.backpressure_events.load(Ordering::Relaxed),
+            credits_consumed: self.metrics.credits_consumed.load(Ordering::Relaxed),
+            credits_refilled: self.metrics.credits_refilled.load(Ordering::Relaxed),
+            streams_under_pressure: self.metrics.streams_under_pressure.load(Ordering::Relaxed),
+            propagation_events: self.metrics.propagation_events.load(Ordering::Relaxed),
+            critical_pressure_events: self.metrics.critical_pressure_events.load(Ordering::Relaxed),
+            global_pressure_level: self.global_pressure.load(),
+            backpressure_ratio: self.metrics.backpressure_ratio(),
+            credit_efficiency: self.metrics.credit_efficiency(),
         }
     }
-    
-    /// Add stream dependency for pressure propagation
-    pub fn add_stream_dependency(&self, dependent: StreamId, dependency: StreamId, weight: f64) {
-        self.propagation_graph.add_dependency(dependent, dependency, weight);
-    }
-    
-    /// Remove stream dependency
-    pub fn remove_stream_dependency(&self, dependent: StreamId, dependency: StreamId) {
-        self.propagation_graph.remove_dependency(dependent, dependency);
-    }
-    
-    /// Refresh credits for all streams
-    pub async fn refresh_credits(&self) {
-        let refresh_interval_ms = self.config.credit_refresh_interval_ms;
-        
-        for entry in self.stream_pressure.iter() {
-            let state = entry.value();
-            let current_level = state.get_level();
-            
-            let credits_to_add = self.flow_controller
-                .calculate_credit_refresh(refresh_interval_ms, current_level);
-            
-            if credits_to_add > 0 {
-                state.add_credits(credits_to_add);
-                self.metrics.record_credit_refresh();
-            }
-        }
-    }
-    
-    /// Get backpressure metrics
-    pub fn get_metrics(&self) -> &BackpressureMetrics {
-        &self.metrics
-    }
-    
-    /// Check system health from backpressure perspective
-    pub fn health_check(&self) -> bool {
-        let global_state = self.get_global_pressure();
-        let metrics = self.get_metrics();
-        
-        global_state.is_healthy() &&
-        metrics.get_throttle_rate() < 0.1 && // Less than 10% throttling
-        metrics.get_credit_utilization_rate() < 0.9 // Less than 90% credit utilization
-    }
-    
-    /// Get stream pressure state
-    pub fn get_stream_pressure(&self, stream_id: StreamId) -> Option<Arc<BackpressureState>> {
-        self.stream_pressure.get(&stream_id).map(|entry| entry.clone())
-    }
-    
-    /// Remove stream from backpressure management
-    pub fn remove_stream(&self, stream_id: StreamId) -> BackpressureResult<()> {
-        self.stream_pressure.remove(&stream_id);
-        
-        // Remove from propagation graph
-        let dependents = self.propagation_graph.get_dependents(stream_id);
-        let dependencies = self.propagation_graph.get_dependencies(stream_id);
-        
-        for dependent in dependents {
-            self.propagation_graph.remove_dependency(dependent, stream_id);
-        }
-        
-        for dependency in dependencies {
-            self.propagation_graph.remove_dependency(stream_id, dependency);
-        }
-        
-        Ok(())
-    }
-    
-    // Private helper methods
-    
-    /// Get or create stream backpressure state
-    fn get_or_create_stream_state(&self, stream_id: StreamId) -> Arc<BackpressureState> {
-        self.stream_pressure
-            .entry(stream_id)
-            .or_insert_with(|| {
-                let initial_credits = self.flow_controller.allocate_initial_credits(stream_id);
-                Arc::new(BackpressureState::new(initial_credits))
-            })
-            .clone()
-    }
-    
-    /// Estimate memory pressure (placeholder implementation)
-    fn estimate_memory_pressure(&self) -> f64 {
-        // In a real implementation, this would check system memory usage
-        // For now, return a safe default
-        0.3
-    }
-    
-    /// Estimate CPU pressure (placeholder implementation)
-    fn estimate_cpu_pressure(&self) -> f64 {
-        // In a real implementation, this would check CPU usage
-        // For now, return a safe default
-        0.4
-    }
-    
-    /// Estimate network pressure (placeholder implementation)
-    fn estimate_network_pressure(&self) -> f64 {
-        // In a real implementation, this would check network utilization
-        // For now, return a safe default
-        0.2
-    }
+}
+
+/// Backpressure metrics snapshot
+#[derive(Debug, Clone)]
+pub struct BackpressureMetricsSnapshot {
+    pub backpressure_events: u64,
+    pub credits_consumed: u64,
+    pub credits_refilled: u64,
+    pub streams_under_pressure: usize,
+    pub propagation_events: u64,
+    pub critical_pressure_events: u64,
+    pub global_pressure_level: BackpressureLevel,
+    pub backpressure_ratio: f64,
+    pub credit_efficiency: f64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio_test;
-    
+
     #[test]
-    fn test_backpressure_level_from_utilization() {
-        assert_eq!(BackpressureLevel::from_utilization(0.1), BackpressureLevel::None);
-        assert_eq!(BackpressureLevel::from_utilization(0.3), BackpressureLevel::Low);
-        assert_eq!(BackpressureLevel::from_utilization(0.6), BackpressureLevel::Medium);
-        assert_eq!(BackpressureLevel::from_utilization(0.8), BackpressureLevel::High);
-        assert_eq!(BackpressureLevel::from_utilization(0.95), BackpressureLevel::Critical);
+    fn test_backpressure_manager_creation() {
+        let config = BackpressureConfig::default();
+        let manager = BackpressureManager::new(config);
+
+        assert_eq!(manager.current_level(), BackpressureLevel::None);
     }
-    
+
     #[test]
-    fn test_backpressure_state_creation() {
-        let state = BackpressureState::new(1000);
-        
-        assert_eq!(state.get_level(), BackpressureLevel::None);
-        assert_eq!(state.get_credits(), 1000);
-        assert!(!state.is_throttling());
+    fn test_stream_registration() {
+        let config = BackpressureConfig::default();
+        let manager = BackpressureManager::new(config);
+
+        manager.register_stream(1).unwrap();
+        assert_eq!(manager.get_pressure_level(1), BackpressureLevel::None);
+
+        manager.unregister_stream(1).unwrap();
+        assert_eq!(manager.get_pressure_level(1), BackpressureLevel::None);
     }
-    
+
     #[test]
     fn test_credit_consumption() {
-        let state = BackpressureState::new(1000);
-        
-        assert!(state.try_consume_credits(100));
-        assert_eq!(state.get_credits(), 900);
-        
-        assert!(state.try_consume_credits(900));
-        assert_eq!(state.get_credits(), 0);
-        
-        assert!(!state.try_consume_credits(1));
-    }
-    
-    #[test]
-    fn test_credit_addition() {
-        let state = BackpressureState::new(500);
-        
-        let new_credits = state.add_credits(200);
-        assert_eq!(new_credits, 700);
-        assert_eq!(state.get_credits(), 700);
-        
-        // Test credit limit
-        state.add_credits(20000); // Exceeds limit
-        assert_eq!(state.get_credits(), MAX_CREDITS_PER_STREAM);
-    }
-    
-    #[test]
-    fn test_pressure_score_calculation() {
-        let state = BackpressureState::new(1000);
-        
-        // Initial state should have low pressure
-        assert!(state.get_pressure_score() < 0.5);
-        
-        // High queue depth should increase pressure
-        state.update_queue_depth(500);
-        state.update_processing_rate(10.0);
-        
-        let pressure_after_queue = state.get_pressure_score();
-        assert!(pressure_after_queue > 0.1);
-    }
-    
-    #[tokio::test]
-    async fn test_backpressure_manager_creation() {
         let config = BackpressureConfig::default();
         let manager = BackpressureManager::new(config);
-        
-        assert!(manager.health_check());
-        assert_eq!(manager.get_available_credits(123), 0); // Stream doesn't exist yet
+
+        manager.register_stream(1).unwrap();
+
+        // Should succeed with initial credits
+        assert!(manager.try_consume_credits(1, 100).is_ok());
+
+        // Should eventually fail if we consume too much
+        for _ in 0..50 {
+            let _ = manager.try_consume_credits(1, 100);
+        }
+
+        // This should definitely fail
+        assert!(manager.try_consume_credits(1, 100).is_err());
     }
-    
-    #[tokio::test]
-    async fn test_credit_allocation_and_consumption() {
+
+    #[test]
+    fn test_credit_refill() {
         let config = BackpressureConfig::default();
         let manager = BackpressureManager::new(config);
-        
-        let stream_id = 123;
-        
-        // Allocate credits
-        assert!(manager.allocate_credits(stream_id, 500).await.is_ok());
-        
-        // Check credits were allocated (plus initial default)
-        let available = manager.get_available_credits(stream_id);
-        assert_eq!(available, DEFAULT_INITIAL_CREDITS + 500);
-        
-        // Consume credits
-        let consumed = manager.consume_credits(stream_id, 200).await.unwrap();
-        assert!(consumed);
-        
-        // Check remaining credits
-        let remaining = manager.get_available_credits(stream_id);
-        assert_eq!(remaining, DEFAULT_INITIAL_CREDITS + 500 - 200);
-        
-        // Try to consume more than available
-        let over_consumed = manager.consume_credits(stream_id, 10000).await.unwrap();
-        assert!(!over_consumed);
+
+        manager.register_stream(1).unwrap();
+
+        // Consume most credits
+        for _ in 0..15 {
+            let _ = manager.try_consume_credits(1, 100);
+        }
+
+        // Add credits manually
+        manager.add_credits(1, 1000).unwrap();
+
+        // Should work again
+        assert!(manager.try_consume_credits(1, 100).is_ok());
     }
-    
-    #[tokio::test]
-    async fn test_pressure_reporting() {
+
+    #[test]
+    fn test_pressure_levels() {
+        assert_eq!(BackpressureLevel::None.delay_multiplier(), 1.0);
+        assert_eq!(BackpressureLevel::Light.delay_multiplier(), 1.2);
+        assert_eq!(BackpressureLevel::Critical.delay_multiplier(), 3.0);
+
+        assert!(BackpressureLevel::None < BackpressureLevel::Light);
+        assert!(BackpressureLevel::Light < BackpressureLevel::Critical);
+    }
+
+    #[test]
+    fn test_dependency_tracking() {
         let config = BackpressureConfig::default();
         let manager = BackpressureManager::new(config);
-        
-        let stream_id = 456;
-        
-        // Report pressure
-        assert!(manager.report_pressure(stream_id, BackpressureLevel::High).await.is_ok());
-        
-        // Check pressure was recorded
-        let state = manager.get_stream_pressure(stream_id).unwrap();
-        assert_eq!(state.get_level(), BackpressureLevel::High);
-        assert!(state.is_throttling());
+
+        manager.add_dependency(2, 1); // Stream 2 depends on Stream 1
+
+        let targets = manager.propagation_graph.get_propagation_targets(2);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0], 1);
     }
-    
-    #[tokio::test]
-    async fn test_pressure_propagation() {
-        let mut config = BackpressureConfig::default();
-        config.enable_pressure_propagation = true;
-        let manager = BackpressureManager::new(config);
-        
-        let producer = 100;
-        let consumer = 200;
-        
-        // Add dependency: consumer depends on producer
-        manager.add_stream_dependency(consumer, producer, 1.0);
-        
-        // Report high pressure on producer
-        assert!(manager.report_pressure(producer, BackpressureLevel::Critical).await.is_ok());
-        
-        // Check if pressure propagated to consumer
-        let consumer_state = manager.get_stream_pressure(consumer).unwrap();
-        assert!(consumer_state.get_pressure_score() > 0.0);
-    }
-    
+
     #[test]
-    fn test_propagation_graph() {
-        let graph = PropagationGraph::new();
-        
-        let stream1 = 100;
-        let stream2 = 200;
-        let stream3 = 300;
-        
-        // Add dependencies
-        graph.add_dependency(stream2, stream1, 0.8);
-        graph.add_dependency(stream3, stream1, 0.6);
-        graph.add_dependency(stream3, stream2, 0.5);
-        
-        // Test dependency queries
-        let deps_of_2 = graph.get_dependencies(stream2);
-        assert_eq!(deps_of_2, vec![stream1]);
-        
-        let deps_of_3 = graph.get_dependencies(stream3);
-        assert!(deps_of_3.contains(&stream1));
-        assert!(deps_of_3.contains(&stream2));
-        
-        let dependents_of_1 = graph.get_dependents(stream1);
-        assert!(dependents_of_1.contains(&stream2));
-        assert!(dependents_of_1.contains(&stream3));
-        
-        // Test weights
-        assert_eq!(graph.get_propagation_weight(stream2, stream1), 0.8);
-        assert_eq!(graph.get_propagation_weight(stream3, stream2), 0.5);
-    }
-    
-    #[test]
-    fn test_flow_controller() {
-        let controller = FlowController::new();
-        
-        let initial_credits = controller.allocate_initial_credits(123);
-        assert_eq!(initial_credits, DEFAULT_INITIAL_CREDITS);
-        
-        let refresh = controller.calculate_credit_refresh(1000, BackpressureLevel::Medium);
-        assert!(refresh > 0);
-        assert!(refresh < controller.credit_refresh_rate as i32); // Should be reduced due to pressure
-    }
-    
-    #[test]
-    fn test_global_pressure_state() {
-        let state = GlobalPressureState::new();
-        
-        assert!(state.is_healthy());
-        assert!(!state.requires_global_throttling());
-        assert_eq!(state.overall_level, BackpressureLevel::None);
-    }
-    
-    #[tokio::test]
-    async fn test_metrics_tracking() {
+    fn test_metrics_collection() {
         let config = BackpressureConfig::default();
         let manager = BackpressureManager::new(config);
-        
-        let stream_id = 789;
-        
-        // Perform operations that should be tracked
-        assert!(manager.allocate_credits(stream_id, 100).await.is_ok());
-        assert!(manager.consume_credits(stream_id, 50).await.is_ok());
-        assert!(manager.report_pressure(stream_id, BackpressureLevel::Medium).await.is_ok());
-        
+
+        manager.register_stream(1).unwrap();
+        let _ = manager.try_consume_credits(1, 100);
+
         let metrics = manager.get_metrics();
-        assert!(metrics.credit_allocations.load(Ordering::Relaxed) > 0);
-        assert!(metrics.credit_consumptions.load(Ordering::Relaxed) > 0);
-        assert!(metrics.get_credit_utilization_rate() > 0.0);
-    }
-    
-    #[tokio::test]
-    async fn test_credit_refresh() {
-        let config = BackpressureConfig::default();
-        let manager = BackpressureManager::new(config);
-        
-        let stream_id = 999;
-        
-        // Create stream and consume some credits
-        assert!(manager.consume_credits(stream_id, 500).await.is_ok());
-        let before_refresh = manager.get_available_credits(stream_id);
-        
-        // Refresh credits
-        manager.refresh_credits().await;
-        
-        let after_refresh = manager.get_available_credits(stream_id);
-        assert!(after_refresh > before_refresh);
-    }
-    
-    #[tokio::test]
-    async fn test_stream_removal() {
-        let config = BackpressureConfig::default();
-        let manager = BackpressureManager::new(config);
-        
-        let stream_id = 888;
-        
-        // Create stream state
-        assert!(manager.allocate_credits(stream_id, 100).await.is_ok());
-        assert!(manager.get_stream_pressure(stream_id).is_some());
-        
-        // Remove stream
-        assert!(manager.remove_stream(stream_id).is_ok());
-        assert!(manager.get_stream_pressure(stream_id).is_none());
+        assert!(metrics.credits_consumed > 0);
     }
 }

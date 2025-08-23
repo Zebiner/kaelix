@@ -88,13 +88,13 @@ impl From<PluginLoadStrategyConfig> for PluginLoadStrategy {
             PluginLoadStrategyConfig::Static { name } => PluginLoadStrategy::Static { name },
             PluginLoadStrategyConfig::Dynamic { library_path, symbol_name } => {
                 PluginLoadStrategy::Dynamic { library_path, symbol_name }
-            }
+            },
             PluginLoadStrategyConfig::Wasm { module_path, runtime_config } => {
                 PluginLoadStrategy::Wasm { module_path, runtime_config }
-            }
+            },
             PluginLoadStrategyConfig::Remote { registry_url, plugin_spec, credentials } => {
                 PluginLoadStrategy::Remote { registry_url, plugin_spec, credentials }
-            }
+            },
         }
     }
 }
@@ -291,28 +291,17 @@ impl PluginLoader {
 
         // Load plugin based on strategy
         let plugin = match strategy {
-            PluginLoadStrategy::Static { name } => {
-                self.load_static_plugin(&name).await?
-            }
-            PluginLoadStrategy::Dynamic {
-                library_path,
-                symbol_name,
-            } => {
+            PluginLoadStrategy::Static { name } => self.load_static_plugin(&name).await?,
+            PluginLoadStrategy::Dynamic { library_path, symbol_name } => {
                 self.load_dynamic_plugin(&library_path, &symbol_name).await?
-            }
-            PluginLoadStrategy::Wasm {
-                module_path,
-                runtime_config,
-            } => {
+            },
+            PluginLoadStrategy::Wasm { module_path, runtime_config } => {
                 self.load_wasm_plugin(&module_path, &runtime_config).await?
-            }
-            PluginLoadStrategy::Remote {
-                registry_url,
-                plugin_spec,
-                credentials,
-            } => {
-                self.load_remote_plugin(&registry_url, &plugin_spec, credentials.as_ref()).await?
-            }
+            },
+            PluginLoadStrategy::Remote { registry_url, plugin_spec, credentials } => {
+                self.load_remote_plugin(&registry_url, &plugin_spec, credentials.as_ref())
+                    .await?
+            },
         };
 
         // Validate plugin security
@@ -325,10 +314,7 @@ impl PluginLoader {
         self.cache.insert(strategy_for_cache, plugin.clone()).await;
 
         let loading_time = start_time.elapsed();
-        tracing::info!(
-            loading_time_ms = loading_time.as_millis(),
-            "Plugin loaded successfully"
-        );
+        tracing::info!(loading_time_ms = loading_time.as_millis(), "Plugin loaded successfully");
 
         Ok(plugin)
     }
@@ -339,7 +325,7 @@ impl PluginLoader {
         name: &str,
     ) -> PluginResult<Box<dyn crate::plugin::PluginObject>> {
         tracing::debug!(plugin_name = %name, "Loading static plugin");
-        
+
         // Static plugin loading would look up registered static plugins
         // This is a placeholder for future implementation
         Err(PluginError::Internal {
@@ -366,27 +352,22 @@ impl PluginLoader {
             use libloading::{Library, Symbol};
 
             // Load the dynamic library
-            let library = Library::new(library_path).map_err(|e| {
-                PluginError::LoadingFailed {
-                    path: library_path.display().to_string(),
-                    reason: e.to_string(),
-                }
+            let library = Library::new(library_path).map_err(|e| PluginError::LoadingFailed {
+                path: library_path.display().to_string(),
+                reason: e.to_string(),
             })?;
 
             // Get the symbol
-            let create_plugin: Symbol<unsafe extern "C" fn() -> *mut std::ffi::c_void> =
-                unsafe {
-                    library.get(symbol_name.as_bytes()).map_err(|e| {
-                        PluginError::LoadingFailed {
-                            path: library_path.display().to_string(),
-                            reason: format!("Symbol '{}' not found: {}", symbol_name, e),
-                        }
-                    })?
-                };
+            let create_plugin: Symbol<unsafe extern "C" fn() -> *mut std::ffi::c_void> = unsafe {
+                library.get(symbol_name.as_bytes()).map_err(|e| PluginError::LoadingFailed {
+                    path: library_path.display().to_string(),
+                    reason: format!("Symbol '{}' not found: {}", symbol_name, e),
+                })?
+            };
 
             // Call the plugin creation function
             let plugin_ptr = unsafe { create_plugin() };
-            
+
             if plugin_ptr.is_null() {
                 return Err(PluginError::LoadingFailed {
                     path: library_path.display().to_string(),
@@ -651,9 +632,7 @@ struct SecurityValidator {
 
 impl SecurityValidator {
     fn new(config: &LoaderConfig) -> Self {
-        Self {
-            config: config.clone(),
-        }
+        Self { config: config.clone() }
     }
 
     async fn validate_plugin(
@@ -669,7 +648,7 @@ impl SecurityValidator {
         // - Validate code integrity
         // - Scan for known vulnerabilities
         // - Check against security policies
-        
+
         Ok(())
     }
 }
@@ -681,9 +660,7 @@ struct DependencyResolver {
 
 impl DependencyResolver {
     fn new(config: &LoaderConfig) -> Self {
-        Self {
-            config: config.clone(),
-        }
+        Self { config: config.clone() }
     }
 
     async fn resolve_dependencies(
@@ -699,7 +676,7 @@ impl DependencyResolver {
         // - Verify version compatibility
         // - Load missing dependencies
         // - Handle dependency conflicts
-        
+
         Ok(())
     }
 }
@@ -712,10 +689,7 @@ struct PluginCache {
 
 impl PluginCache {
     fn new(max_size: usize) -> Self {
-        Self {
-            cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            max_size,
-        }
+        Self { cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())), max_size }
     }
 
     async fn get(
@@ -724,7 +698,7 @@ impl PluginCache {
     ) -> Option<Box<dyn crate::plugin::PluginObject>> {
         let cache_key = self.strategy_to_key(strategy);
         let cache = self.cache.read().await;
-        
+
         if let Some(entry) = cache.get(&cache_key) {
             if !entry.is_expired() {
                 // Would need to clone the plugin object
@@ -732,7 +706,7 @@ impl PluginCache {
                 return None;
             }
         }
-        
+
         None
     }
 
@@ -743,7 +717,7 @@ impl PluginCache {
     ) {
         let cache_key = self.strategy_to_key(&strategy);
         let mut cache = self.cache.write().await;
-        
+
         // Check if cache is full
         if cache.len() >= self.max_size {
             // Remove oldest entry (simplified LRU)
@@ -751,13 +725,13 @@ impl PluginCache {
                 cache.remove(&oldest_key);
             }
         }
-        
+
         let entry = CacheEntry {
             // plugin, // Would store the actual plugin
             created_at: Instant::now(),
             last_accessed: Instant::now(),
         };
-        
+
         cache.insert(cache_key, entry);
     }
 
@@ -771,8 +745,8 @@ impl PluginCache {
         CacheStats {
             size: cache.len(),
             max_size: self.max_size,
-            hit_count: 0,   // Would track actual hits
-            miss_count: 0,  // Would track actual misses
+            hit_count: 0,  // Would track actual hits
+            miss_count: 0, // Would track actual misses
         }
     }
 
@@ -782,13 +756,13 @@ impl PluginCache {
             PluginLoadStrategy::Static { name } => format!("static:{}", name),
             PluginLoadStrategy::Dynamic { library_path, symbol_name } => {
                 format!("dynamic:{}:{}", library_path.display(), symbol_name)
-            }
+            },
             PluginLoadStrategy::Wasm { module_path, .. } => {
                 format!("wasm:{}", module_path.display())
-            }
+            },
             PluginLoadStrategy::Remote { registry_url, plugin_spec, .. } => {
                 format!("remote:{}:{}:{}", registry_url, plugin_spec.name, plugin_spec.version)
-            }
+            },
         }
     }
 }
@@ -907,7 +881,7 @@ mod tests {
     #[tokio::test]
     async fn test_plugin_cache() {
         let cache = PluginCache::new(2);
-        
+
         let stats = cache.stats().await;
         assert_eq!(stats.size, 0);
         assert_eq!(stats.max_size, 2);
@@ -917,12 +891,7 @@ mod tests {
 
     #[test]
     fn test_cache_stats() {
-        let stats = CacheStats {
-            size: 5,
-            max_size: 10,
-            hit_count: 80,
-            miss_count: 20,
-        };
+        let stats = CacheStats { size: 5, max_size: 10, hit_count: 80, miss_count: 20 };
 
         assert_eq!(stats.hit_rate(), 80.0);
         assert!(!stats.is_full());
@@ -938,10 +907,7 @@ mod tests {
 
         assert!(entry.is_expired());
 
-        let fresh_entry = CacheEntry {
-            created_at: Instant::now(),
-            last_accessed: Instant::now(),
-        };
+        let fresh_entry = CacheEntry { created_at: Instant::now(), last_accessed: Instant::now() };
 
         assert!(!fresh_entry.is_expired());
     }
@@ -954,12 +920,12 @@ mod tests {
         };
 
         let strategy: PluginLoadStrategy = config.into();
-        
+
         match strategy {
             PluginLoadStrategy::Dynamic { library_path, symbol_name } => {
                 assert_eq!(library_path, PathBuf::from("/path/to/plugin.so"));
                 assert_eq!(symbol_name, "create_plugin");
-            }
+            },
             _ => panic!("Unexpected strategy type"),
         }
     }

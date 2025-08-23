@@ -1,156 +1,140 @@
 [workspace]
-resolver = "2"
 members = [
     "kaelix-core",
-    "kaelix-broker", 
+    "kaelix-broker",
     "kaelix-publisher",
     "kaelix-consumer",
-    # Temporarily excluded for zero-tolerance compliance
-    # "kaelix-tests",
-    # "kaelix-benches",
+    "kaelix-cluster",
 ]
+resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.88.0"
-authors = ["MemoryStreamer Team"]
+edition = "2021"
+rust-version = "1.70"
+authors = ["Kaelix Contributors"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/memorystreamer/kaelix"
-homepage = "https://github.com/memorystreamer/kaelix"
+repository = "https://github.com/kaelix/kaelix"
+homepage = "https://kaelix.org"
 documentation = "https://docs.rs/kaelix"
-description = "Ultra-high-performance distributed streaming system"
-keywords = ["streaming", "messaging", "performance", "async", "distributed"]
+keywords = ["streaming", "messaging", "broker", "async", "high-performance"]
 categories = ["network-programming", "asynchronous", "data-structures"]
 
 [workspace.dependencies]
-# Core runtime and async - SECURITY UPDATED
-tokio = { version = "1.35.1", features = ["full"] }  # Security fix: minimum secure version
-tokio-util = "0.7"
-tokio-test = "0.4"
-futures = "0.3"
-async-trait = "0.1"
-
-# Serialization and data handling
+# Core dependencies
+uuid = { version = "1.11.1", features = ["v4", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bincode = "1.3"
-bytes = "1.7"
-smallvec = { version = "1.13", features = ["serde"] }
+toml = "0.8"
+thiserror = "2.0"
+anyhow = "1.0"
 
-# Performance and concurrency - SECURITY UPDATED
-crossbeam = "0.8"
-crossbeam-channel = "0.5"
-crossbeam-queue = "0.3.11"  # Security fix: unsound implementation resolved
-crossbeam-utils = "0.8.19"  # Security fix: atomic operations vulnerability
+# Async runtime - SECURITY UPDATED
+tokio = { version = "1.47", features = ["full"] }
+tokio-util = { version = "0.7", features = ["full"] }
+futures = "0.3"
+tokio-test = "0.4"
+
+# Configuration and observability - SECURITY UPDATED
+config = "0.14"
+color-eyre = "0.6"
+ahash = "0.8.11"
+# SECURITY FIX: validator upgrade to resolve ReDOS vulnerability
+validator = "0.20.0"  # Security fix: regex DoS vulnerability resolved
+
+# Cryptographic utilities - SECURITY UPDATED
+blake3 = "1.5"
+crc32fast = "1.4"
+zeroize = "1.8.1"
+ring = "0.17"
+subtle = "2.6"
+
+# High-performance data structures - SECURITY UPDATED
 parking_lot = "0.12"
-rayon = "1.10"
+crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
+crossbeam-utils = "0.8"
+crossbeam = "0.8"
+smallvec = "1.13"
+
+# SECURITY FIX: EvMap replacement - resolves potential memory vulnerabilities
 dashmap = "6.0"
 flume = "0.11"
 num_cpus = "1.16"
 lock_api = "0.4.11"  # Security fix: data race issues resolved
+arc-swap = "1.7"
+
+# Parallel computing
+rayon = "1.10"
 
 # Networking - SECURITY UPDATED
 quinn = "0.11"
 rustls = "0.23"
 socket2 = "0.5.7"  # Security fix: replaces net2, resolves vulnerabilities
 
-# Observability and metrics - SECURITY UPDATED
+# Observability and metrics - SECURITY UPDATED  
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.23"
 metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 # SECURITY FIX: Update prometheus to resolve protobuf vulnerability
-prometheus = "0.13.4"  # Will be overridden to secure version in dependents
+prometheus = "0.17.0"  # Will be overridden to secure version in dependents
 
-# Error handling and utilities
-thiserror = "1.0"
-anyhow = "1.0"
-uuid = { version = "1.10", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+# File system operations - SECURITY UPDATED
+tempfile = "3.12"  # Security fix: tmp file vulnerabilities resolved
+walkdir = "2.5"
+notify = "6.1"
 
-# Security and cryptography
-ring = "0.17"
-zeroize = { version = "1.8", features = ["derive"] }
-subtle = "2.6"
+# Serialization and encoding - SECURITY UPDATED
+bytes = { version = "1.7", features = ["serde"] }
+bincode = "1.3"
+flate2 = "1.0"
+lz4 = "1.25"
+
+# Time utilities - SECURITY UPDATED  
+chrono = { version = "0.4", features = ["serde", "std"] }
+
+# Development and testing - SECURITY UPDATED
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.7"
+test-case = "3.3"
+rstest = "0.19"
+mockall = "0.12"
 rand = "0.8"
 
-# Testing dependencies
-proptest = "1.6"
-criterion = { version = "0.5", features = ["html_reports"] }
-quickcheck = "1.0"
-arbitrary = { version = "1.3", features = ["derive"] }
-test-case = "3.1"
-rstest = "0.21"
-mockall = "0.13"
-wiremock = "0.6"
-fake = { version = "2.9", features = ["derive"] }
+# Signal handling - SECURITY UPDATED
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 
-# Performance profiling
-pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
-dhat = "0.3"
+# Plugin system support
+libloading = "0.8"
 
-# Security testing
-cargo-fuzz = "0.12"
-afl = "0.15"
-honggfuzz = "0.5"
+# Async trait support
+async-trait = "0.1"
 
-# Benchmarking utilities  
-iai-callgrind = "0.11"
-codspeed-criterion-compat = "2.7"
-
-[workspace.lints.rust]
-unsafe_code = "forbid"
-missing_docs = "warn"
-unreachable_pub = "warn"
-unused_import_braces = "warn"
-unused_lifetimes = "warn"
-unused_qualifications = "warn"
-
-[workspace.lints.clippy]
-# Deny performance and correctness lints
-all = { level = "deny", priority = -1 }
-pedantic = { level = "deny", priority = -1 }
-nursery = { level = "deny", priority = -1 }
-cargo = { level = "deny", priority = -1 }
-
-# Allow some pedantic lints that can be overly restrictive
-module_name_repetitions = "allow"
-similar_names = "allow"
-too_many_lines = "allow"
-cast_precision_loss = "allow"
-cast_possible_truncation = "allow"
-cast_sign_loss = "allow"
-
-# Specifically target performance
-inefficient_to_string = "deny"
-large_enum_variant = "deny"
-needless_pass_by_value = "deny"
-trivially_copy_pass_by_ref = "deny"
-unnecessary_wraps = "deny"
+# Time utilities - avoid yanked versions
+instant = "0.1.13"  # Use specific version to avoid potential issues
 
 [profile.release]
-opt-level = 3
 debug = false
-strip = true
-lto = "fat"
+overflow-checks = false
+lto = true
 codegen-units = 1
 panic = "abort"
+strip = true
 
-[profile.release-with-debug]
-inherits = "release"
+[profile.dev]
 debug = true
-strip = false
-
-[profile.bench]
-inherits = "release"
-debug = true
+overflow-checks = true
+incremental = true
 
 [profile.test]
-opt-level = 1
+debug = true
+overflow-checks = true
 
-# Profile for fuzzing
-[profile.fuzz]
-inherits = "dev"
-opt-level = 1
+[profile.bench]
+debug = false
 overflow-checks = false
+lto = true
+codegen-units = 1

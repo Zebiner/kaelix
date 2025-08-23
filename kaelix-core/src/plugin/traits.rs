@@ -3,10 +3,10 @@
 use crate::message::Message;
 use crate::plugin::{PluginCapabilities, PluginError, ProcessingContext};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 
 /// Core plugin trait for all plugin implementations.
 ///
@@ -52,23 +52,6 @@ use chrono::{DateTime, Utc};
 ///     type State = MyPluginState;
 ///     type Error = MyPluginError;
 ///
-///     fn name(&self) -> &str { "my-plugin" }
-///     fn version(&self) -> semver::Version { semver::Version::new(1, 0, 0) }
-///     fn description(&self) -> &str { "Example plugin" }
-///     
-///     fn capabilities(&self) -> PluginCapabilities {
-///         PluginCapabilities::default()
-///     }
-///     
-///     fn validate_config(&self, config: &Self::Config) -> Result<(), Self::Error> {
-///         if config.name.is_empty() {
-///             return Err(MyPluginError::ProcessingFailed {
-///                 reason: "Name cannot be empty".to_string(),
-///             });
-///         }
-///         Ok(())
-///     }
-///
 ///     async fn initialize(&self, config: Self::Config) -> Result<Self::State, Self::Error> {
 ///         Ok(MyPluginState { counter: 0 })
 ///     }
@@ -76,72 +59,52 @@ use chrono::{DateTime, Utc};
 ///     async fn process_message(
 ///         &self,
 ///         state: &mut Self::State,
-///         message: &Message,
-///         context: &ProcessingContext,
-///     ) -> Result<MessageProcessingResult, Self::Error> {
+///         message: Message,
+///         _context: &ProcessingContext,
+///     ) -> Result<Option<Message>, Self::Error> {
 ///         state.counter += 1;
-///         Ok(MessageProcessingResult::Continue)
+///         Ok(Some(message))
 ///     }
-///     
-///     async fn shutdown(&self, state: Self::State) -> Result<(), Self::Error> {
-///         Ok(())
+///
+///     fn metadata(&self) -> PluginMetadata {
+///         PluginMetadata {
+///             name: "MyPlugin".to_string(),
+///             version: "1.0.0".to_string(),
+///             description: "A simple example plugin".to_string(),
+///             author: "Kaelix Team".to_string(),
+///             capabilities: PluginCapabilities::default(),
+///         }
 ///     }
 /// }
 /// ```
 #[async_trait]
-pub trait Plugin: Send + Sync + 'static + Clone {
+pub trait Plugin: Send + Sync + Clone + 'static {
     /// Plugin-specific configuration type
     type Config: Send + Sync + 'static;
 
-    /// Plugin-specific state type  
+    /// Plugin-specific state type
     type State: Send + Sync + 'static;
 
     /// Plugin-specific error type
-    type Error: std::error::Error + Send + Sync + 'static;
+    type Error: std::error::Error + Send + Sync + 'static + Into<PluginError>;
 
-    /// Get the plugin name (unique identifier).
-    fn name(&self) -> &str;
-
-    /// Get the plugin version.
-    fn version(&self) -> semver::Version;
-
-    /// Get the plugin description.
-    fn description(&self) -> &str;
-
-    /// Get the plugin capabilities and permissions.
-    fn capabilities(&self) -> PluginCapabilities;
-
-    /// Validate plugin configuration before initialization.
+    /// Initialize the plugin with the provided configuration.
     ///
-    /// This method is called before `initialize` to ensure the configuration
-    /// is valid and the plugin can be started successfully.
-    ///
-    /// # Parameters
-    /// - `config`: The configuration to validate
-    ///
-    /// # Returns
-    /// - `Ok(())`: Configuration is valid
-    /// - `Err(Error)`: Configuration is invalid with description
-    fn validate_config(&self, config: &Self::Config) -> Result<(), Self::Error>;
-
-    /// Initialize the plugin with the given configuration.
-    ///
-    /// This method is called once when the plugin is first loaded.
-    /// It should set up any necessary resources and return the initial state.
+    /// This method is called once when the plugin is loaded and should
+    /// perform any necessary setup operations.
     ///
     /// # Parameters
     /// - `config`: Plugin configuration
     ///
     /// # Returns
-    /// - `Ok(State)`: Plugin initialized successfully with initial state
-    /// - `Err(Error)`: Initialization failed
+    /// - `Ok(state)`: Plugin initialized successfully with initial state
+    /// - `Err(error)`: Plugin initialization failed
     async fn initialize(&self, config: Self::Config) -> Result<Self::State, Self::Error>;
 
-    /// Process a message through this plugin.
+    /// Process a message with the plugin's state.
     ///
-    /// This is the main entry point for message processing. The plugin
-    /// can modify the message, update its state, and decide how the
-    /// processing pipeline should continue.
+    /// This is the core message processing method that implements the
+    /// plugin's business logic.
     ///
     /// # Parameters
     /// - `state`: Mutable reference to plugin state
@@ -149,38 +112,43 @@ pub trait Plugin: Send + Sync + 'static + Clone {
     /// - `context`: Processing context with metadata and utilities
     ///
     /// # Returns
-    /// - `Ok(MessageProcessingResult)`: Processing result
-    /// - `Err(Error)`: Processing failed
+    /// - `Ok(Some(message))`: Message processed, return transformed message
+    /// - `Ok(None)`: Message consumed, do not forward
+    /// - `Err(error)`: Processing failed
     async fn process_message(
         &self,
         state: &mut Self::State,
-        message: &Message,
+        message: Message,
         context: &ProcessingContext,
-    ) -> Result<MessageProcessingResult, Self::Error>;
+    ) -> Result<Option<Message>, Self::Error>;
 
     /// Shutdown the plugin gracefully.
     ///
-    /// This method is called when the plugin is being unloaded.
-    /// It should clean up any resources and perform final operations.
+    /// This method is called when the plugin is being unloaded and should
+    /// perform any necessary cleanup operations.
     ///
     /// # Parameters
-    /// - `state`: Final plugin state
+    /// - `state`: Plugin state to cleanup
     ///
     /// # Returns
-    /// - `Ok(())`: Shutdown completed successfully
-    /// - `Err(Error)`: Shutdown failed
-    async fn shutdown(&self, state: Self::State) -> Result<(), Self::Error>;
+    /// - `Ok(())`: Plugin shutdown successfully
+    /// - `Err(error)`: Plugin shutdown failed
+    async fn shutdown(&self, state: Self::State) -> Result<(), Self::Error> {
+        // Default implementation - plugins can override if needed
+        drop(state);
+        Ok(())
+    }
 
     /// Perform a health check on the plugin.
     ///
-    /// This method is called periodically to check if the plugin
-    /// is functioning correctly.
+    /// This method should return the current health status of the plugin
+    /// based on its internal state and any external dependencies.
     ///
     /// # Parameters
-    /// - `state`: Current plugin state
+    /// - `state`: Reference to plugin state
     ///
     /// # Returns
-    /// - `PluginHealth`: Current health status
+    /// Plugin health information
     async fn health_check(&self, _state: &Self::State) -> PluginHealth {
         PluginHealth {
             status: HealthStatus::Healthy,
@@ -190,120 +158,66 @@ pub trait Plugin: Send + Sync + 'static + Clone {
         }
     }
 
-    /// Get plugin metadata for monitoring and management.
+    /// Get plugin metadata.
+    ///
+    /// This method returns static information about the plugin including
+    /// name, version, description, and capabilities.
     ///
     /// # Returns
-    /// - `PluginMetadata`: Static plugin information
-    fn metadata(&self) -> PluginMetadata {
-        PluginMetadata {
-            name: self.name().to_string(),
-            version: self.version(),
-            description: self.description().to_string(),
-            capabilities: self.capabilities(),
-            dependencies: Vec::new(),
-            tags: Vec::new(),
-        }
-    }
-}
-
-/// Type-erased plugin object for dynamic plugin management.
-///
-/// This trait allows plugins with different type parameters to be
-/// stored and managed uniformly.
-#[async_trait]
-pub trait PluginObject: Send + Sync + 'static {
-    /// Get the plugin name.
-    fn name(&self) -> &str;
-
-    /// Get the plugin version.
-    fn version(&self) -> semver::Version;
-
-    /// Get the plugin description.
-    fn description(&self) -> &str;
-
-    /// Get the plugin capabilities.
-    fn capabilities(&self) -> PluginCapabilities;
-
-    /// Initialize the plugin with raw configuration data.
-    async fn initialize_raw(&self, config_data: &[u8]) -> Result<Box<dyn Any + Send + Sync>, PluginError>;
-
-    /// Process a message with type-erased state.
-    async fn process_message_erased(
-        &self,
-        state: &mut Box<dyn Any + Send + Sync>,
-        message: &Message,
-        context: &ProcessingContext,
-    ) -> Result<MessageProcessingResult, PluginError>;
-
-    /// Shutdown the plugin with type-erased state.
-    async fn shutdown_erased(&self, state: Box<dyn Any + Send + Sync>) -> Result<(), PluginError>;
-
-    /// Check plugin health with type-erased state.
-    fn health_check_erased(&self, state: &Box<dyn Any + Send + Sync>) -> Result<HealthStatus, PluginError>;
-
-    /// Get plugin metrics with type-erased state.
-    fn metrics_erased(&self, state: &Box<dyn Any + Send + Sync>) -> Result<crate::plugin::PluginMetrics, PluginError>;
-
-    /// Get plugin metadata.
+    /// Plugin metadata
     fn metadata(&self) -> PluginMetadata;
 
-    /// Clone the plugin object into a new box.
-    fn clone_box(&self) -> Box<dyn PluginObject>;
+    /// Start the plugin (lifecycle hook).
+    ///
+    /// Called when the plugin transitions from loaded to running state.
+    async fn start(&self, _state: &mut Self::State) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
-    /// Convert to Any for downcasting.
-    fn as_any(&self) -> &dyn Any;
-}
-
-/// Implement Clone for Box<dyn PluginObject> using the clone_box method
-impl Clone for Box<dyn PluginObject> {
-    fn clone(&self) -> Self {
-        self.clone_box()
+    /// Stop the plugin (lifecycle hook).
+    ///
+    /// Called when the plugin transitions from running to stopped state.
+    async fn stop(&self, _state: &mut Self::State) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
-/// Message processing result enumeration.
-///
-/// Indicates how the message processing pipeline should proceed
-/// after a plugin has processed a message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MessageProcessingResult {
-    /// Continue processing with the next plugin in the chain
-    Continue,
+/// Plugin metadata containing information about the plugin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginMetadata {
+    /// Plugin name
+    pub name: String,
 
-    /// Stop processing and accept the message
-    Accept,
+    /// Plugin version
+    pub version: String,
 
-    /// Stop processing and reject the message
-    Reject {
-        /// Reason for rejection
-        reason: String,
-    },
+    /// Plugin description
+    pub description: String,
 
-    /// Transform the message and continue processing
-    Transform {
-        /// New message to process
-        message: Message,
-    },
+    /// Plugin author
+    pub author: String,
 
-    /// Split the message into multiple messages
-    Split {
-        /// New messages to process
-        messages: Vec<Message>,
-    },
-
-    /// Route the message to a specific topic/partition
-    Route {
-        /// Target topic
-        topic: String,
-        /// Optional target partition
-        partition: Option<u32>,
-    },
+    /// Plugin capabilities
+    pub capabilities: PluginCapabilities,
 }
 
-/// Message filtering trait for plugins that only filter messages.
-///
-/// This is a specialized trait for plugins that only need to decide
-/// whether messages should be accepted or rejected without transformation.
+/// Message processing result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MessageProcessingResult {
+    /// Message processed successfully, continue with transformed message
+    Processed(Message),
+
+    /// Message consumed, do not forward
+    Consumed,
+
+    /// Message forwarded without modification
+    Forwarded(Message),
+
+    /// Message processing deferred
+    Deferred { retry_after: std::time::Duration },
+}
+
+/// Message filter trait for plugins that filter messages based on content.
 #[async_trait]
 pub trait MessageFilter: Send + Sync + 'static {
     /// Filter error type
@@ -316,9 +230,9 @@ pub trait MessageFilter: Send + Sync + 'static {
     /// - `context`: Processing context
     ///
     /// # Returns
-    /// - `Ok(true)`: Message should be accepted
-    /// - `Ok(false)`: Message should be rejected
-    /// - `Err(Error)`: Filtering failed
+    /// - `Ok(true)`: Message passes filter
+    /// - `Ok(false)`: Message filtered out
+    /// - `Err(Error)`: Filter error
     async fn filter_message(
         &self,
         message: &Message,
@@ -326,10 +240,7 @@ pub trait MessageFilter: Send + Sync + 'static {
     ) -> Result<bool, Self::Error>;
 }
 
-/// Message transformation trait for plugins that transform messages.
-///
-/// This is a specialized trait for plugins that transform messages
-/// without complex state management.
+/// Message transformer trait for plugins that transform messages.
 #[async_trait]
 pub trait MessageTransformer: Send + Sync + 'static {
     /// Transformer error type
@@ -342,9 +253,9 @@ pub trait MessageTransformer: Send + Sync + 'static {
     /// - `context`: Processing context
     ///
     /// # Returns
-    /// - `Ok(Some(message))`: Message was transformed
-    /// - `Ok(None)`: Message should be filtered out
-    /// - `Err(Error)`: Transformation failed
+    /// - `Ok(Some(message))`: Message transformed
+    /// - `Ok(None)`: Message consumed
+    /// - `Err(Error)`: Transform error
     async fn transform_message(
         &self,
         message: Message,
@@ -355,7 +266,7 @@ pub trait MessageTransformer: Send + Sync + 'static {
 /// Message processing trait for plugins that process messages without state.
 ///
 /// This is a specialized trait for stateless message processors.
-#[async_trait] 
+#[async_trait]
 pub trait MessageProcessor: Send + Sync + 'static {
     /// Processor error type
     type Error: std::error::Error + Send + Sync + 'static;
@@ -398,134 +309,139 @@ pub enum HealthStatus {
     /// Plugin is healthy and functioning normally
     Healthy,
 
-    /// Plugin has minor issues but is still functional
-    Warning,
+    /// Plugin is degraded but still functional
+    Degraded,
 
-    /// Plugin has critical issues and may not be functioning
-    Critical,
+    /// Plugin is unhealthy and may not function properly
+    Unhealthy,
 
-    /// Plugin is in an unknown state
+    /// Plugin status is unknown
     Unknown,
 }
 
-/// Plugin metadata for registration and management.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginMetadata {
-    /// Plugin name (unique identifier)
-    pub name: String,
+/// Type-erased plugin object for dynamic dispatch.
+///
+/// This trait allows plugins to be stored and managed uniformly
+/// regardless of their specific type parameters.
+pub trait PluginObject: Send + Sync + 'static {
+    /// Initialize the plugin with configuration
+    async fn initialize_erased(
+        &self,
+        config: Box<dyn Any + Send + Sync>,
+    ) -> Result<Box<dyn Any + Send + Sync>, PluginError>;
 
-    /// Plugin version
-    pub version: semver::Version,
+    /// Start the plugin
+    async fn start_erased(&self, state: &mut Box<dyn Any + Send + Sync>)
+    -> Result<(), PluginError>;
 
-    /// Plugin description
-    pub description: String,
+    /// Stop the plugin
+    async fn stop_erased(&self, state: &mut Box<dyn Any + Send + Sync>) -> Result<(), PluginError>;
 
-    /// Plugin capabilities
-    pub capabilities: PluginCapabilities,
+    /// Process a message
+    async fn process_message_erased(
+        &self,
+        state: &mut Box<dyn Any + Send + Sync>,
+        message: Message,
+        context: &ProcessingContext,
+    ) -> Result<Option<Message>, PluginError>;
 
-    /// Plugin dependencies
-    pub dependencies: Vec<String>,
+    /// Shutdown the plugin
+    async fn shutdown_erased(&self, state: Box<dyn Any + Send + Sync>) -> Result<(), PluginError>;
 
-    /// Plugin tags for categorization
-    pub tags: Vec<String>,
+    /// Health check
+    fn health_check_erased(
+        &self,
+        state: &Box<dyn Any + Send + Sync>,
+    ) -> Result<HealthStatus, PluginError>;
+
+    /// Get plugin metrics
+    fn metrics_erased(
+        &self,
+        state: &Box<dyn Any + Send + Sync>,
+    ) -> Result<crate::plugin::PluginMetrics, PluginError>;
+
+    /// Get plugin metadata
+    fn metadata(&self) -> PluginMetadata;
+
+    /// Clone the plugin object
+    fn clone_box(&self) -> Box<dyn PluginObject>;
+
+    /// Get the plugin as Any for downcasting
+    fn as_any(&self) -> &dyn Any;
 }
 
-impl PluginMetadata {
-    /// Validate the plugin metadata.
-    pub fn validate(&self) -> Result<(), PluginError> {
-        if self.name.is_empty() {
-            return Err(PluginError::ValidationError {
-                plugin_id: "unknown".to_string(),
-                field: "name".to_string(),
-                reason: "Plugin name cannot be empty".to_string(),
-            });
-        }
-
-        if self.description.is_empty() {
-            return Err(PluginError::ValidationError {
-                plugin_id: self.name.clone(),
-                field: "description".to_string(),
-                reason: "Plugin description cannot be empty".to_string(),
-            });
-        }
-
-        Ok(())
-    }
-}
-
-/// Automatic implementation of PluginObject for types that implement Plugin.
-#[async_trait]
+/// Blanket implementation of PluginObject for all Plugin types
 impl<P> PluginObject for P
 where
-    P: Plugin + Clone,
-    P::Config: for<'de> Deserialize<'de>,
+    P: Plugin + Clone + 'static,
+    P::Config: 'static,
     P::State: 'static,
-    P::Error: Into<PluginError>,
 {
-    fn name(&self) -> &str {
-        Plugin::name(self)
-    }
-
-    fn version(&self) -> semver::Version {
-        Plugin::version(self)
-    }
-
-    fn description(&self) -> &str {
-        Plugin::description(self)
-    }
-
-    fn capabilities(&self) -> PluginCapabilities {
-        Plugin::capabilities(self)
-    }
-
-    async fn initialize_raw(&self, config_data: &[u8]) -> Result<Box<dyn Any + Send + Sync>, PluginError> {
-        let config: P::Config = serde_json::from_slice(config_data)
-            .map_err(|e| PluginError::SerializationError {
-                plugin_id: self.name().to_string(),
-                operation: "deserialize_config".to_string(),
-                reason: e.to_string(),
-            })?;
+    async fn initialize_erased(
+        &self,
+        config: Box<dyn Any + Send + Sync>,
+    ) -> Result<Box<dyn Any + Send + Sync>, PluginError> {
+        let config = *config.downcast::<P::Config>().map_err(|_| PluginError::Internal {
+            operation: "downcast_config".to_string(),
+            reason: "Failed to downcast plugin config".to_string(),
+        })?;
 
         let state = self.initialize(config).await.map_err(|e| e.into())?;
         Ok(Box::new(state))
     }
 
+    async fn start_erased(
+        &self,
+        state: &mut Box<dyn Any + Send + Sync>,
+    ) -> Result<(), PluginError> {
+        let state = state.downcast_mut::<P::State>().ok_or_else(|| PluginError::Internal {
+            operation: "downcast_state".to_string(),
+            reason: "Failed to downcast plugin state".to_string(),
+        })?;
+
+        self.start(state).await.map_err(|e| e.into())
+    }
+
+    async fn stop_erased(&self, state: &mut Box<dyn Any + Send + Sync>) -> Result<(), PluginError> {
+        let state = state.downcast_mut::<P::State>().ok_or_else(|| PluginError::Internal {
+            operation: "downcast_state".to_string(),
+            reason: "Failed to downcast plugin state".to_string(),
+        })?;
+
+        self.stop(state).await.map_err(|e| e.into())
+    }
+
     async fn process_message_erased(
         &self,
         state: &mut Box<dyn Any + Send + Sync>,
-        message: &Message,
+        message: Message,
         context: &ProcessingContext,
-    ) -> Result<MessageProcessingResult, PluginError> {
-        let state = state
-            .downcast_mut::<P::State>()
-            .ok_or_else(|| PluginError::Internal {
-                operation: "downcast_state".to_string(),
-                reason: "Failed to downcast plugin state".to_string(),
-            })?;
+    ) -> Result<Option<Message>, PluginError> {
+        let state = state.downcast_mut::<P::State>().ok_or_else(|| PluginError::Internal {
+            operation: "downcast_state".to_string(),
+            reason: "Failed to downcast plugin state".to_string(),
+        })?;
 
-        self.process_message(state, message, context)
-            .await
-            .map_err(|e| e.into())
+        self.process_message(state, message, context).await.map_err(|e| e.into())
     }
 
     async fn shutdown_erased(&self, state: Box<dyn Any + Send + Sync>) -> Result<(), PluginError> {
-        let state = *state
-            .downcast::<P::State>()
-            .map_err(|_| PluginError::Internal {
-                operation: "downcast_state".to_string(),
-                reason: "Failed to downcast plugin state for shutdown".to_string(),
-            })?;
+        let state = *state.downcast::<P::State>().map_err(|_| PluginError::Internal {
+            operation: "downcast_state".to_string(),
+            reason: "Failed to downcast plugin state for shutdown".to_string(),
+        })?;
 
         self.shutdown(state).await.map_err(|e| e.into())
     }
 
-    fn health_check_erased(&self, state: &Box<dyn Any + Send + Sync>) -> Result<HealthStatus, PluginError> {
-        let state = state
-            .downcast_ref::<P::State>()
-            .ok_or_else(|| PluginError::Internal {
-                operation: "downcast_state".to_string(),
-                reason: "Failed to downcast plugin state for health check".to_string(),
-            })?;
+    fn health_check_erased(
+        &self,
+        state: &Box<dyn Any + Send + Sync>,
+    ) -> Result<HealthStatus, PluginError> {
+        let state = state.downcast_ref::<P::State>().ok_or_else(|| PluginError::Internal {
+            operation: "downcast_state".to_string(),
+            reason: "Failed to downcast plugin state for health check".to_string(),
+        })?;
 
         // Create a future for the health check and block on it
         // Note: This is a simplified approach - in a real implementation,
@@ -537,7 +453,10 @@ where
         Ok(health.status)
     }
 
-    fn metrics_erased(&self, _state: &Box<dyn Any + Send + Sync>) -> Result<crate::plugin::PluginMetrics, PluginError> {
+    fn metrics_erased(
+        &self,
+        _state: &Box<dyn Any + Send + Sync>,
+    ) -> Result<crate::plugin::PluginMetrics, PluginError> {
         // Return default metrics - would be implemented based on plugin type
         Ok(crate::plugin::PluginMetrics::default())
     }
@@ -553,4 +472,84 @@ where
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+/// Hook event types that plugins can listen for
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HookEvent {
+    /// Plugin lifecycle events
+    PluginStarted(String),
+    PluginStopped(String),
+    PluginFailed(String),
+
+    /// Message processing events
+    MessageReceived(String),
+    MessageProcessed(String),
+    MessageFiltered(String),
+
+    /// System events
+    SystemStartup,
+    SystemShutdown,
+    HealthCheckStarted,
+    HealthCheckCompleted,
+
+    /// Custom events
+    Custom(String, HashMap<String, String>),
+}
+
+impl HookEvent {
+    /// Get the event name as a string
+    pub fn name(&self) -> &str {
+        match self {
+            HookEvent::PluginStarted(_) => "plugin_started",
+            HookEvent::PluginStopped(_) => "plugin_stopped",
+            HookEvent::PluginFailed(_) => "plugin_failed",
+            HookEvent::MessageReceived(_) => "message_received",
+            HookEvent::MessageProcessed(_) => "message_processed",
+            HookEvent::MessageFiltered(_) => "message_filtered",
+            HookEvent::SystemStartup => "system_startup",
+            HookEvent::SystemShutdown => "system_shutdown",
+            HookEvent::HealthCheckStarted => "health_check_started",
+            HookEvent::HealthCheckCompleted => "health_check_completed",
+            HookEvent::Custom(name, _) => name,
+        }
+    }
+
+    /// Check if this event matches a pattern
+    pub fn matches(&self, pattern: &str) -> bool {
+        self.name() == pattern || pattern == "*"
+    }
+}
+
+/// Plugin hook trait for event-driven plugin interactions
+#[async_trait]
+pub trait PluginHook: Send + Sync + 'static {
+    /// Hook error type
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Handle a hook event
+    ///
+    /// # Parameters
+    /// - `event`: The event that occurred
+    /// - `context`: Processing context
+    ///
+    /// # Returns
+    /// - `Ok(())`: Hook handled successfully
+    /// - `Err(Error)`: Hook handling failed
+    async fn handle_event(
+        &self,
+        event: HookEvent,
+        context: &ProcessingContext,
+    ) -> Result<(), Self::Error>;
+
+    /// Get the events this hook is interested in
+    fn interested_events(&self) -> Vec<String>;
+
+    /// Get hook priority (higher priority hooks run first)
+    fn priority(&self) -> i32 {
+        0
+    }
+
+    /// Get hook name for debugging
+    fn name(&self) -> &str;
 }

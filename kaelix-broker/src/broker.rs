@@ -1,118 +1,206 @@
-//! Core broker implementation.
+//! # Message Broker
+//!
+//! The broker module implements the core message brokering functionality,
+//! handling message routing, storage, and delivery coordination.
 
-use crate::config::BrokerConfig;
-use kaelix_core::{Message, Result};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use dashmap::DashMap;
+use kaelix_core::{Message, Result, Topic};
+use parking_lot::RwLock;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use tokio::sync::broadcast;
+use tracing::{debug, info, warn};
 
-/// Main broker instance that handles message routing and storage.
+/// Broker state information
 #[derive(Debug)]
-pub struct Broker {
-    config: BrokerConfig,
+pub struct BrokerState {
+    /// Whether the broker is currently running
+    pub running: bool,
+    /// Total number of messages processed
+    pub messages_processed: u64,
+    /// Number of active subscriptions
+    pub active_subscriptions: usize,
+}
+
+/// Core message broker implementation
+#[derive(Debug)]
+pub struct MessageBroker {
+    /// Current broker state
     state: Arc<RwLock<BrokerState>>,
+    /// Topic to subscription mapping
+    subscriptions: Arc<DashMap<Topic, Vec<broadcast::Sender<Message>>>>,
+    /// Message processing metrics
+    message_counter: AtomicU64,
 }
 
-/// Internal broker state.
-#[derive(Debug)]
-struct BrokerState {
-    running: bool,
-    client_count: usize,
-}
-
-/// Handle for interacting with a running broker.
-#[derive(Debug, Clone)]
-pub struct BrokerHandle {
-    broker: Arc<Broker>,
-}
-
-impl Broker {
-    /// Create a new broker instance with the given configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the broker configuration is invalid or if
-    /// initialization resources cannot be allocated.
-    pub fn new(config: BrokerConfig) -> Result<Self> {
-        let state = Arc::new(RwLock::new(BrokerState { running: false, client_count: 0 }));
-
-        Ok(Self { config, state })
+impl MessageBroker {
+    /// Create a new message broker instance
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(RwLock::new(BrokerState {
+                running: false,
+                messages_processed: 0,
+                active_subscriptions: 0,
+            })),
+            subscriptions: Arc::new(DashMap::new()),
+            message_counter: AtomicU64::new(0),
+        }
     }
 
-    /// Start the broker and begin accepting connections.
-    ///
+    /// Start the broker and begin processing messages
     /// # Errors
-    ///
-    /// Returns an error if the broker is already running or if network
-    /// listeners cannot be started.
-    pub async fn start(&self) -> Result<BrokerHandle> {
-        let mut state = self.state.write().await;
+    /// Returns an error if broker is already running or cannot start
+    pub fn start(&self) -> Result<()> {
+        info!("Starting message broker");
+        let mut state = self.state.write();
         if state.running {
-            return Err(kaelix_core::Error::Internal {
-                message: "Broker is already running".to_string(),
-            });
+            return Err(kaelix_core::Error::Internal("Broker is already running".to_string()));
         }
 
         state.running = true;
         drop(state);
 
-        // TODO: Start network listeners, storage engines, etc.
-
-        Ok(BrokerHandle {
-            broker: Arc::new(Self { config: self.config.clone(), state: Arc::clone(&self.state) }),
-        })
+        info!("Message broker started successfully");
+        Ok(())
     }
 
-    /// Stop the broker gracefully.
-    ///
+    /// Stop the broker gracefully
     /// # Errors
-    ///
-    /// Returns an error if graceful shutdown cannot be completed within
-    /// the configured timeout period.
-    pub async fn stop(&self) -> Result<()> {
-        {
-            let mut state = self.state.write().await;
-            state.running = false;
+    /// Returns an error if broker is not running or cannot stop
+    #[allow(clippy::cognitive_complexity)]
+    pub fn stop(&self) -> Result<()> {
+        info!("Stopping message broker");
+        let mut state = self.state.write();
+        if !state.running {
+            warn!("Broker is not running");
+            return Ok(());
         }
 
-        // TODO: Graceful shutdown of connections and storage
+        state.running = false;
+        drop(state);
+
+        // Clean up resources
+        self.subscriptions.clear();
+
+        info!("Message broker stopped successfully");
+        Ok(())
+    }
+
+    /// Publish a message to a topic
+    /// # Errors
+    /// Returns an error if broker is not running or publishing fails
+    #[allow(clippy::cognitive_complexity)]
+    pub fn publish(&self, topic: &Topic, message: &Message) -> Result<()> {
+        let state = self.state.read();
+        if !state.running {
+            return Err(kaelix_core::Error::Internal("Broker is not running".to_string()));
+        }
+        drop(state);
+
+        debug!(topic = %topic, "Publishing message");
+
+        if let Some(senders) = self.subscriptions.get(topic) {
+            for sender in senders.value() {
+                if let Err(e) = sender.send(message.clone()) {
+                    warn!(error = %e, "Failed to send message to subscriber");
+                }
+            }
+        }
+
+        // Update metrics
+        self.message_counter.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
 
-    /// Get current broker statistics.
-    pub async fn stats(&self) -> BrokerStats {
-        let state = self.state.read().await;
-        BrokerStats {
+    /// Subscribe to a topic and receive messages
+    /// # Errors
+    /// Returns an error if broker is not running or subscription fails
+    pub fn subscribe(&self, topic: &Topic) -> Result<broadcast::Receiver<Message>> {
+        let state = self.state.read();
+        if !state.running {
+            return Err(kaelix_core::Error::Internal("Broker is not running".to_string()));
+        }
+        drop(state);
+
+        debug!(topic = %topic, "Creating subscription");
+
+        let (sender, receiver) = broadcast::channel(1000);
+
+        self.subscriptions.entry(topic.clone()).or_default().push(sender);
+
+        Ok(receiver)
+    }
+
+    /// Get the current broker state
+    #[must_use]
+    pub fn state(&self) -> BrokerState {
+        let state = self.state.read();
+        let message_count = self.message_counter.load(Ordering::Relaxed);
+        let subscription_count = self.subscriptions.len();
+
+        BrokerState {
             running: state.running,
-            client_count: state.client_count,
-            // TODO: Add more metrics
+            messages_processed: message_count,
+            active_subscriptions: subscription_count,
         }
     }
-}
 
-impl BrokerHandle {
-    /// Publish a message to a topic.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the message cannot be published due to topic
-    /// validation failures, storage issues, or broker shutdown.
-    pub fn publish(&self, _message: Message) -> Result<()> {
-        // TODO: Implement message publishing
-        Ok(())
+    /// Get total number of messages processed
+    #[must_use]
+    pub fn messages_processed(&self) -> u64 {
+        self.message_counter.load(Ordering::Relaxed)
     }
 
-    /// Get broker statistics.
-    pub async fn stats(&self) -> BrokerStats {
-        self.broker.stats().await
+    /// Get number of active subscriptions
+    #[must_use]
+    pub fn active_subscriptions(&self) -> usize {
+        self.subscriptions.len()
     }
 }
 
-/// Broker runtime statistics.
-#[derive(Debug, Clone)]
-pub struct BrokerStats {
-    /// Whether the broker is currently running
-    pub running: bool,
-    /// Number of connected clients
-    pub client_count: usize,
+impl Default for MessageBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kaelix_core::Topic;
+    use bytes::Bytes;
+
+    #[tokio::test]
+    async fn test_broker_lifecycle() {
+        let broker = MessageBroker::new();
+
+        assert!(!broker.state().running);
+
+        broker.start().expect("Failed to start broker");
+        assert!(broker.state().running);
+
+        broker.stop().expect("Failed to stop broker");
+        assert!(!broker.state().running);
+    }
+
+    #[tokio::test]
+    async fn test_publish_subscribe() {
+        let broker = MessageBroker::new();
+        broker.start().expect("Failed to start broker");
+
+        let topic = Topic::new("test.topic").expect("Failed to create topic");
+        let mut receiver = broker.subscribe(&topic).expect("Failed to subscribe");
+
+        let message = Message::new("test.topic", Bytes::from("test message")).expect("Failed to create message");
+        broker.publish(&topic, &message).expect("Failed to publish");
+
+        let received = receiver.recv().await.expect("Failed to receive message");
+        assert_eq!(received.payload, message.payload);
+
+        broker.stop().expect("Failed to stop broker");
+    }
 }

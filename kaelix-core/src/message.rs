@@ -56,22 +56,20 @@ impl Topic {
     pub fn new(name: impl Into<String>) -> crate::Result<Self> {
         let name = name.into();
         if name.is_empty() {
-            return Err(crate::Error::InvalidMessage {
-                message: "Topic name cannot be empty".to_string(),
-            });
+            return Err(crate::Error::MessageFormat("Topic name cannot be empty".to_string()));
         }
 
         if name.len() > 255 {
-            return Err(crate::Error::InvalidMessage {
-                message: "Topic name cannot exceed 255 characters".to_string(),
-            });
+            return Err(crate::Error::MessageFormat(
+                "Topic name cannot exceed 255 characters".to_string(),
+            ));
         }
 
         // Validate topic name characters (alphanumeric, hyphens, underscores, dots)
         if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
-            return Err(crate::Error::InvalidMessage {
-                message: "Topic name contains invalid characters".to_string(),
-            });
+            return Err(crate::Error::MessageFormat(
+                "Topic name contains invalid characters".to_string(),
+            ));
         }
 
         Ok(Self(name))
@@ -166,13 +164,13 @@ impl Message {
         size += std::mem::size_of::<Timestamp>();
         size += std::mem::size_of::<Option<PartitionId>>();
         size += std::mem::size_of::<Option<Offset>>();
-        
+
         if let Some(ref headers) = self.headers {
             for (key, value) in headers {
                 size += key.len() + value.len();
             }
         }
-        
+
         size
     }
 
@@ -190,7 +188,9 @@ impl Message {
 
     /// Add or update a header.
     pub fn set_header(&mut self, key: String, value: String) {
-        self.headers.get_or_insert_with(std::collections::HashMap::new).insert(key, value);
+        self.headers
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(key, value);
     }
 
     /// Remove a header.
@@ -349,11 +349,11 @@ impl MessageBuilder {
     /// # Errors
     /// Returns an error if required fields are missing or invalid.
     pub fn build(self) -> crate::Result<Message> {
-        let topic = self.topic.ok_or_else(|| crate::Error::InvalidMessage {
-            message: "Topic is required".to_string(),
-        })?;
+        let topic = self
+            .topic
+            .ok_or_else(|| crate::Error::MessageFormat("Topic is required".to_string()))?;
 
-        let payload = self.payload.unwrap_or_else(Bytes::new);
+        let payload = self.payload.unwrap_or_default();
 
         Ok(Message {
             id: MessageId::new(),
@@ -375,7 +375,7 @@ pub struct MessageBatch {
 
     /// Batch metadata
     pub batch_id: MessageId,
-    
+
     /// Batch creation timestamp
     pub created_at: Timestamp,
 }
@@ -384,11 +384,7 @@ impl MessageBatch {
     /// Create a new message batch.
     #[must_use]
     pub fn new(messages: Vec<Message>) -> Self {
-        Self {
-            messages,
-            batch_id: MessageId::new(),
-            created_at: Utc::now(),
-        }
+        Self { messages, batch_id: MessageId::new(), created_at: Utc::now() }
     }
 
     /// Get the number of messages in the batch.
@@ -525,7 +521,7 @@ mod tests {
     #[test]
     fn test_message_headers() {
         let mut message = Message::default();
-        
+
         assert!(!message.has_headers());
         assert!(message.header("key").is_none());
 
@@ -547,7 +543,7 @@ mod tests {
         assert!(Topic::new("").is_err());
         assert!(Topic::new("invalid topic with spaces").is_err());
         assert!(Topic::new("invalid@topic").is_err());
-        
+
         let long_name = "a".repeat(256);
         assert!(Topic::new(long_name).is_err());
     }
@@ -574,9 +570,9 @@ mod tests {
     fn test_message_equality() {
         let message1 = Message::new("test", Bytes::from("data")).unwrap();
         let message2 = message1.clone();
-        
+
         assert_eq!(message1, message2);
-        
+
         let message3 = message1.clone_with_new_id();
         assert_ne!(message1, message3); // Different IDs
     }

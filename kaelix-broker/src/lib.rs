@@ -18,12 +18,12 @@
 //! ## Examples
 //!
 //! ```rust
-//! use kaelix_broker::{Broker, BrokerConfig};
+//! use kaelix_broker::{MessageBroker, BrokerConfig};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = BrokerConfig::default();
-//! let broker = Broker::new(config)?;
-//! broker.start().await?;
+//! let broker = MessageBroker::new();
+//! broker.start()?;
 //! # Ok(())
 //! # }
 //! ```
@@ -39,12 +39,12 @@ pub mod network;
 pub mod routing;
 pub mod storage;
 
-pub use broker::{Broker, BrokerHandle};
+pub use broker::{BrokerState, MessageBroker};
 pub use config::BrokerConfig;
 pub use kaelix_core::{Error, Result};
 
 /// Re-export commonly used types
 pub mod prelude {
-    pub use crate::{Broker, BrokerConfig, BrokerHandle};
+    pub use crate::{BrokerConfig, BrokerState, MessageBroker};
     pub use kaelix_core::prelude::*;
 }

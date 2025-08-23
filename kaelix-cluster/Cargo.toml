@@ -1,0 +1,110 @@
+[package]
+name = "kaelix-cluster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Distributed clustering and consensus library for MemoryStreamer"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# Core dependencies from kaelix-core
+kaelix-core = { path = "../kaelix-core" }
+
+# Core async runtime
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Data handling and serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
+smallvec = { workspace = true }
+
+# High-performance concurrency and data structures
+crossbeam = { workspace = true }
+crossbeam-channel = { workspace = true }
+crossbeam-queue = { workspace = true }
+crossbeam-utils = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+rayon = { workspace = true }
+
+# Networking and communication
+quinn = { workspace = true }
+rustls = { workspace = true }
+socket2 = { workspace = true }
+
+# Time handling
+chrono = { workspace = true }
+time = "0.3"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+rand = { workspace = true }
+fastrand = "2.0"
+
+# Configuration and validation
+toml = "0.8"
+validator = { version = "0.20.0", features = ["derive"] }
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+
+# Security and cryptography
+ring = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+
+# Additional high-performance utilities
+lru = "0.12"
+ahash = "0.8"
+num_cpus = { workspace = true }
+
+# Lock-free data structures
+lockfree = "0.5"
+atomic = "0.6"
+
+# Memory management (optional features)
+mimalloc = { version = "0.1", optional = true }
+jemallocator = { version = "0.5", optional = true }
+
+[features]
+default = ["membership", "consensus", "communication"]
+experimental = []
+
+# Core cluster features
+membership = []
+consensus = []
+communication = []
+
+# Performance optimizations
+high-performance = ["dep:mimalloc"]
+jemalloc = ["dep:jemallocator"]
+mimalloc = ["dep:mimalloc"]
+
+# Development features
+dev = []
+bench = []
+
+[dev-dependencies]
+proptest = { workspace = true }
+test-case = { workspace = true }
+rstest = { workspace = true }
+tokio-test = "0.4"
+tempfile = "3.8"
+criterion = { workspace = true }

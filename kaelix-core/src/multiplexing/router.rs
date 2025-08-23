@@ -1,1006 +1,690 @@
-//! High-Performance Message Router
+//! Intelligent message routing system for optimal distribution.
 //!
-//! SIMD-optimized routing engine supporting topic-based, content-based, and load-balanced routing.
-//! Designed for <100ns routing decisions with 1M+ routing rules and intelligent caching.
+//! Provides sophisticated routing strategies and load balancing algorithms
+//! for distributing messages across multiple streams and partitions with
+//! maximum efficiency and reliability.
 
-use crate::multiplexing::error::{RoutingError, RoutingResult, StreamId};
-use crate::message::Message;
-use crossbeam::atomic::AtomicCell;
-use dashmap::DashMap;
-use lru::LruCache;
-use parking_lot::RwLock;
-use smallvec::SmallVec;
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
-use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
-/// Maximum number of target streams per routing decision
-const MAX_TARGET_STREAMS: usize = 8;
+use crate::message::MessageId;
+use crate::multiplexing::{Priority, StreamId};
+use crate::{Error, Result};
 
-/// LRU cache capacity for hot routing paths
-const ROUTING_CACHE_CAPACITY: usize = 100_000;
-
-/// Pattern cache capacity for compiled patterns
-const PATTERN_CACHE_CAPACITY: usize = 10_000;
-
-/// Load balancing ring size for consistent hashing
-const LOAD_BALANCE_RING_SIZE: usize = 1024;
-
-/// Topic type for routing
-pub type Topic = String;
-
-/// Route key for caching
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct RouteKey {
-    pub topic: Option<String>,
-    pub content_hash: u64,
-    pub message_type: String,
-}
-
-impl RouteKey {
-    pub fn from_message(message: &Message) -> Self {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        if let Some(payload) = message.payload.get(0..64) { // Hash first 64 bytes
-            payload.hash(&mut hasher);
-        }
-        
-        Self {
-            topic: Some(message.topic.clone()),
-            content_hash: hasher.finish(),
-            message_type: message.message_type.clone().unwrap_or_default(),
-        }
-    }
-}
-
-/// Routing decision result
-#[derive(Debug, Clone)]
-pub struct RouteDecision {
-    pub target_streams: SmallVec<[StreamId; MAX_TARGET_STREAMS]>,
-    pub routing_type: RoutingType,
-    pub decision_time_ns: u64,
-    pub load_balance_hint: LoadBalanceHint,
-    pub cache_hit: bool,
-}
-
-impl RouteDecision {
-    pub fn new(routing_type: RoutingType) -> Self {
-        Self {
-            target_streams: SmallVec::new(),
-            routing_type,
-            decision_time_ns: 0,
-            load_balance_hint: LoadBalanceHint::None,
-            cache_hit: false,
-        }
-    }
-    
-    pub fn add_target(&mut self, stream_id: StreamId) {
-        if self.target_streams.len() < MAX_TARGET_STREAMS {
-            self.target_streams.push(stream_id);
-        }
-    }
-    
-    pub fn set_timing(&mut self, start: Instant) {
-        self.decision_time_ns = start.elapsed().as_nanos() as u64;
-    }
-}
-
-/// Routing strategy types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RoutingType {
-    TopicBased,
-    ContentBased,
-    Broadcast,
-    LoadBalanced,
+/// Routing strategies for intelligent message distribution
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoutingStrategy {
+    /// Round-robin distribution
     RoundRobin,
-    WeightedRoundRobin,
+    /// Load-based routing (least loaded stream)
+    LeastLoaded,
+    /// Hash-based consistent routing
     ConsistentHash,
-    Custom(u8), // Custom routing ID
+    /// Geographic routing based on location
+    Geographic,
+    /// Priority-based routing
+    PriorityBased,
+    /// Adaptive routing that switches strategies based on conditions
+    Adaptive,
+    /// Custom routing with user-defined logic
+    Custom,
 }
 
-/// Load balancing hints for optimization
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoadBalanceHint {
-    None,
-    PreferLocal,
-    PreferRemote,
-    AvoidOverloaded,
-    RequireHealthy,
-    Sticky(u64), // Session affinity
-}
-
-/// Content-based routing rule
-#[derive(Debug, Clone)]
-pub struct ContentRule {
-    pub rule_id: u64,
-    pub pattern: String,
-    pub compiled_pattern: Option<CompiledPattern>,
-    pub target_streams: Vec<StreamId>,
-    pub priority: u8,
-    pub enabled: bool,
-}
-
-impl ContentRule {
-    pub fn new(rule_id: u64, pattern: String, target_streams: Vec<StreamId>) -> Self {
-        Self {
-            rule_id,
-            pattern,
-            compiled_pattern: None,
-            target_streams,
-            priority: 128, // Default priority
-            enabled: true,
-        }
-    }
-    
-    pub fn with_priority(mut self, priority: u8) -> Self {
-        self.priority = priority;
-        self
-    }
-    
-    pub fn compile_pattern(&mut self) -> RoutingResult<()> {
-        let compiled = CompiledPattern::compile(&self.pattern)?;
-        self.compiled_pattern = Some(compiled);
-        Ok(())
+impl Default for RoutingStrategy {
+    fn default() -> Self {
+        RoutingStrategy::LeastLoaded
     }
 }
 
-/// Compiled pattern for fast matching
-#[derive(Debug, Clone)]
-pub struct CompiledPattern {
-    pub pattern: String,
-    pub literal_match: Option<Vec<u8>>,
-    pub regex_id: Option<usize>,
-    pub is_literal: bool,
+/// Routing configuration parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    /// Primary routing strategy
+    pub strategy: RoutingStrategy,
+    /// Backup routing strategy if primary fails
+    pub fallback_strategy: Option<RoutingStrategy>,
+    /// Enable adaptive routing based on load
+    pub adaptive_routing: bool,
+    /// Load balancing window size for metrics
+    pub load_window_size: usize,
+    /// Maximum routing attempts before failure
+    pub max_routing_attempts: u32,
+    /// Routing timeout per attempt
+    pub routing_timeout: Duration,
+    /// Enable geographic awareness
+    pub geographic_routing: bool,
+    /// Priority queue configuration
+    pub priority_config: PriorityConfig,
 }
 
-impl CompiledPattern {
-    pub fn compile(pattern: &str) -> RoutingResult<Self> {
-        // Simple pattern compilation - can be enhanced with real regex engine
-        let is_literal = !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[');
-        
-        let literal_match = if is_literal {
-            Some(pattern.as_bytes().to_vec())
-        } else {
-            None
-        };
-        
-        Ok(Self {
-            pattern: pattern.to_string(),
-            literal_match,
-            regex_id: None,
-            is_literal,
-        })
-    }
-    
-    pub fn matches(&self, data: &[u8]) -> bool {
-        if let Some(ref literal) = self.literal_match {
-            return data.windows(literal.len()).any(|window| window == literal);
-        }
-        
-        // Fallback to string matching for now
-        let data_str = String::from_utf8_lossy(data);
-        data_str.contains(&self.pattern)
-    }
-}
-
-/// Content rule set for efficient pattern matching
-#[derive(Debug)]
-pub struct ContentRuleSet {
-    pub rules: Vec<ContentRule>,
-    pub literal_rules: HashMap<Vec<u8>, Vec<usize>>, // Literal pattern -> rule indices
-    pub pattern_rules: Vec<usize>, // Non-literal rule indices
-    pub rule_count: usize,
-}
-
-impl ContentRuleSet {
-    pub fn new() -> Self {
-        Self {
-            rules: Vec::new(),
-            literal_rules: HashMap::new(),
-            pattern_rules: Vec::new(),
-            rule_count: 0,
-        }
-    }
-    
-    pub fn add_rule(&mut self, mut rule: ContentRule) -> RoutingResult<()> {
-        rule.compile_pattern()?;
-        
-        let rule_index = self.rules.len();
-        
-        if let Some(ref compiled) = rule.compiled_pattern {
-            if compiled.is_literal {
-                if let Some(ref literal) = compiled.literal_match {
-                    self.literal_rules.entry(literal.clone())
-                        .or_insert_with(Vec::new)
-                        .push(rule_index);
-                }
-            } else {
-                self.pattern_rules.push(rule_index);
-            }
-        }
-        
-        self.rules.push(rule);
-        self.rule_count += 1;
-        Ok(())
-    }
-    
-    pub fn match_content(&self, data: &[u8]) -> Vec<&ContentRule> {
-        let mut matches = Vec::new();
-        
-        // Check literal matches first (fastest)
-        for (literal, rule_indices) in &self.literal_rules {
-            if data.windows(literal.len()).any(|window| window == literal) {
-                for &rule_index in rule_indices {
-                    if let Some(rule) = self.rules.get(rule_index) {
-                        if rule.enabled {
-                            matches.push(rule);
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Check pattern matches
-        for &rule_index in &self.pattern_rules {
-            if let Some(rule) = self.rules.get(rule_index) {
-                if rule.enabled {
-                    if let Some(ref compiled) = rule.compiled_pattern {
-                        if compiled.matches(data) {
-                            matches.push(rule);
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Sort by priority (higher priority first)
-        matches.sort_by(|a, b| b.priority.cmp(&a.priority));
-        matches
-    }
-}
-
-/// SIMD-optimized pattern matcher
-#[derive(Debug)]
-pub struct SimdPatternMatcher {
-    pub avx2_enabled: bool,
-    pub pattern_cache: Arc<RwLock<LruCache<String, CompiledPattern>>>,
-}
-
-impl SimdPatternMatcher {
-    pub fn new() -> Self {
-        let pattern_cache = Arc::new(RwLock::new(
-            LruCache::new(NonZeroUsize::new(PATTERN_CACHE_CAPACITY).unwrap())
-        ));
-        
-        Self {
-            avx2_enabled: Self::detect_avx2(),
-            pattern_cache,
-        }
-    }
-    
-    fn detect_avx2() -> bool {
-        // Simple CPU feature detection - can be enhanced with proper CPUID checking
-        #[cfg(target_arch = "x86_64")]
-        {
-            std::arch::is_x86_feature_detected!("avx2")
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            false
-        }
-    }
-    
-    pub fn compile_pattern(&self, pattern: &str) -> RoutingResult<CompiledPattern> {
-        // Check cache first
-        {
-            let cache = self.pattern_cache.read();
-            if let Some(compiled) = cache.peek(pattern) {
-                return Ok(compiled.clone());
-            }
-        }
-        
-        // Compile new pattern
-        let compiled = CompiledPattern::compile(pattern)?;
-        
-        // Cache the result
-        {
-            let mut cache = self.pattern_cache.write();
-            cache.put(pattern.to_string(), compiled.clone());
-        }
-        
-        Ok(compiled)
-    }
-    
-    /// Match multiple patterns against data using SIMD when available
-    pub fn match_patterns(&self, patterns: &[String], data: &[u8]) -> Vec<bool> {
-        if self.avx2_enabled && patterns.len() >= 4 && data.len() >= 32 {
-            // Use SIMD optimization for large batches
-            self.match_patterns_simd(patterns, data)
-        } else {
-            // Fallback to scalar matching
-            self.match_patterns_scalar(patterns, data)
-        }
-    }
-    
-    fn match_patterns_scalar(&self, patterns: &[String], data: &[u8]) -> Vec<bool> {
-        let mut results = Vec::with_capacity(patterns.len());
-        
-        for pattern in patterns {
-            if let Ok(compiled) = self.compile_pattern(pattern) {
-                results.push(compiled.matches(data));
-            } else {
-                results.push(false);
-            }
-        }
-        
-        results
-    }
-    
-    #[cfg(target_arch = "x86_64")]
-    fn match_patterns_simd(&self, patterns: &[String], data: &[u8]) -> Vec<bool> {
-        // SIMD implementation would go here
-        // For now, fallback to scalar
-        self.match_patterns_scalar(patterns, data)
-    }
-    
-    #[cfg(not(target_arch = "x86_64"))]
-    fn match_patterns_simd(&self, patterns: &[String], data: &[u8]) -> Vec<bool> {
-        self.match_patterns_scalar(patterns, data)
-    }
-}
-
-/// Load balancer for stream selection
-#[derive(Debug)]
-pub struct LoadBalancer {
-    pub strategy: LoadBalanceStrategy,
-    pub ring: Vec<StreamId>, // Consistent hashing ring
-    pub stream_weights: HashMap<StreamId, u32>,
-    pub stream_health: HashMap<StreamId, bool>,
-    pub current_robin: AtomicUsize, // For round-robin
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum LoadBalanceStrategy {
-    RoundRobin,
-    WeightedRoundRobin,
-    ConsistentHash,
-    LeastConnections,
-    Random,
-}
-
-impl LoadBalancer {
-    pub fn new(strategy: LoadBalanceStrategy) -> Self {
-        Self {
-            strategy,
-            ring: Vec::new(),
-            stream_weights: HashMap::new(),
-            stream_health: HashMap::new(),
-            current_robin: AtomicUsize::new(0),
-        }
-    }
-    
-    pub fn add_stream(&mut self, stream_id: StreamId, weight: u32) {
-        self.stream_weights.insert(stream_id, weight);
-        self.stream_health.insert(stream_id, true);
-        
-        // Add to consistent hash ring
-        for i in 0..(weight * 10) { // Virtual nodes
-            let virtual_id = ((stream_id as u64) << 32) | (i as u64);
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            virtual_id.hash(&mut hasher);
-            let hash = hasher.finish();
-            
-            // Insert in sorted order
-            let pos = self.ring.binary_search_by_key(&hash, |&id| {
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                id.hash(&mut h);
-                h.finish()
-            }).unwrap_or_else(|pos| pos);
-            self.ring.insert(pos, stream_id);
-        }
-    }
-    
-    pub fn remove_stream(&mut self, stream_id: StreamId) {
-        self.stream_weights.remove(&stream_id);
-        self.stream_health.remove(&stream_id);
-        self.ring.retain(|&id| id != stream_id);
-    }
-    
-    pub fn select_stream(&self, key: Option<&[u8]>) -> Option<StreamId> {
-        let healthy_streams: Vec<_> = self.stream_health
-            .iter()
-            .filter(|(_, &healthy)| healthy)
-            .map(|(&id, _)| id)
-            .collect();
-        
-        if healthy_streams.is_empty() {
-            return None;
-        }
-        
-        match self.strategy {
-            LoadBalanceStrategy::RoundRobin => {
-                let index = self.current_robin.fetch_add(1, Ordering::Relaxed) % healthy_streams.len();
-                Some(healthy_streams[index])
-            }
-            LoadBalanceStrategy::ConsistentHash => {
-                if let Some(key) = key {
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    key.hash(&mut hasher);
-                    let hash = hasher.finish();
-                    
-                    // Find the appropriate stream in the ring
-                    let pos = self.ring.binary_search_by_key(&hash, |&id| {
-                        let mut h = std::collections::hash_map::DefaultHasher::new();
-                        id.hash(&mut h);
-                        h.finish()
-                    }).unwrap_or_else(|pos| pos % self.ring.len());
-                    
-                    if pos < self.ring.len() {
-                        Some(self.ring[pos])
-                    } else {
-                        Some(healthy_streams[0])
-                    }
-                } else {
-                    Some(healthy_streams[0])
-                }
-            }
-            LoadBalanceStrategy::Random => {
-                use std::collections::hash_map::DefaultHasher;
-                let mut hasher = DefaultHasher::new();
-                std::ptr::addr_of!(self).hash(&mut hasher);
-                let random_val = hasher.finish() as usize;
-                let index = random_val % healthy_streams.len();
-                Some(healthy_streams[index])
-            }
-            _ => Some(healthy_streams[0]), // Fallback
-        }
-    }
-    
-    pub fn update_health(&mut self, stream_id: StreamId, healthy: bool) {
-        self.stream_health.insert(stream_id, healthy);
-    }
-}
-
-/// Router performance metrics
-#[derive(Debug, Default)]
-pub struct RoutingMetrics {
-    pub routes_processed: AtomicU64,
-    pub routing_time_ns: AtomicU64,
-    pub cache_hits: AtomicU64,
-    pub cache_misses: AtomicU64,
-    pub topic_routes: AtomicU64,
-    pub content_routes: AtomicU64,
-    pub load_balanced_routes: AtomicU64,
-    pub routing_errors: AtomicU64,
-    pub pattern_compilations: AtomicU64,
-    pub simd_optimizations: AtomicU64,
-}
-
-impl RoutingMetrics {
-    pub fn record_routing(&self, duration_ns: u64, routing_type: RoutingType, cache_hit: bool) {
-        self.routes_processed.fetch_add(1, Ordering::Relaxed);
-        self.routing_time_ns.fetch_add(duration_ns, Ordering::Relaxed);
-        
-        if cache_hit {
-            self.cache_hits.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.cache_misses.fetch_add(1, Ordering::Relaxed);
-        }
-        
-        match routing_type {
-            RoutingType::TopicBased => self.topic_routes.fetch_add(1, Ordering::Relaxed),
-            RoutingType::ContentBased => self.content_routes.fetch_add(1, Ordering::Relaxed),
-            RoutingType::LoadBalanced | RoutingType::RoundRobin | 
-            RoutingType::WeightedRoundRobin | RoutingType::ConsistentHash => {
-                self.load_balanced_routes.fetch_add(1, Ordering::Relaxed)
-            },
-            _ => {},
-        };
-    }
-    
-    pub fn record_error(&self) {
-        self.routing_errors.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    pub fn record_pattern_compilation(&self) {
-        self.pattern_compilations.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    pub fn record_simd_optimization(&self) {
-        self.simd_optimizations.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    pub fn get_average_routing_time_ns(&self) -> u64 {
-        let count = self.routes_processed.load(Ordering::Relaxed);
-        if count == 0 {
-            return 0;
-        }
-        self.routing_time_ns.load(Ordering::Relaxed) / count
-    }
-    
-    pub fn get_cache_hit_rate(&self) -> f64 {
-        let hits = self.cache_hits.load(Ordering::Relaxed) as f64;
-        let misses = self.cache_misses.load(Ordering::Relaxed) as f64;
-        let total = hits + misses;
-        if total == 0.0 {
-            return 0.0;
-        }
-        hits / total
-    }
-    
-    pub fn get_error_rate(&self) -> f64 {
-        let errors = self.routing_errors.load(Ordering::Relaxed) as f64;
-        let total = self.routes_processed.load(Ordering::Relaxed) as f64;
-        if total == 0.0 {
-            return 0.0;
-        }
-        errors / total
-    }
-}
-
-/// Router configuration
-#[derive(Debug, Clone)]
-pub struct RouterConfig {
-    pub max_topic_routes: usize,
-    pub max_content_rules: usize,
-    pub cache_capacity: usize,
-    pub enable_simd: bool,
-    pub enable_caching: bool,
-    pub load_balance_strategy: LoadBalanceStrategy,
-    pub cache_ttl_ms: u64,
-}
-
-impl Default for RouterConfig {
+impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            max_topic_routes: 100_000,
-            max_content_rules: 10_000,
-            cache_capacity: ROUTING_CACHE_CAPACITY,
-            enable_simd: true,
-            enable_caching: true,
-            load_balance_strategy: LoadBalanceStrategy::RoundRobin,
-            cache_ttl_ms: 60_000, // 1 minute
+            strategy: RoutingStrategy::default(),
+            fallback_strategy: Some(RoutingStrategy::RoundRobin),
+            adaptive_routing: true,
+            load_window_size: 1000,
+            max_routing_attempts: 3,
+            routing_timeout: Duration::from_millis(100),
+            geographic_routing: false,
+            priority_config: PriorityConfig::default(),
         }
     }
 }
 
-/// High-Performance Message Router
-#[derive(Debug)]
-pub struct MessageRouter {
-    /// Topic-based routing with hash table
-    topic_routes: Arc<DashMap<Topic, Vec<StreamId>>>,
-    /// Content-based routing with pattern matching
-    content_routes: Arc<RwLock<ContentRuleSet>>,
-    /// SIMD-optimized pattern matcher
-    pattern_engine: Arc<SimdPatternMatcher>,
-    /// LRU cache for hot routing paths
-    routing_cache: Arc<RwLock<LruCache<RouteKey, RouteDecision>>>,
-    /// Load balancing strategies
-    load_balancer: Arc<RwLock<LoadBalancer>>,
-    /// Routing metrics
-    metrics: RoutingMetrics,
-    /// Configuration
-    config: RouterConfig,
+/// Priority configuration for routing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriorityConfig {
+    /// Enable priority-based routing
+    pub enabled: bool,
+    /// Number of priority levels (0 = highest)
+    pub levels: u8,
+    /// Bandwidth allocation per priority level (percentage)
+    pub bandwidth_allocation: Vec<f32>,
+    /// Enable priority preemption
+    pub preemption_enabled: bool,
 }
 
-impl MessageRouter {
-    /// Create a new message router
-    pub fn new(config: RouterConfig) -> Self {
-        let routing_cache = Arc::new(RwLock::new(
-            LruCache::new(NonZeroUsize::new(config.cache_capacity).unwrap())
-        ));
-        
-        let load_balancer = Arc::new(RwLock::new(
-            LoadBalancer::new(config.load_balance_strategy)
-        ));
-        
+impl Default for PriorityConfig {
+    fn default() -> Self {
         Self {
-            topic_routes: Arc::new(DashMap::new()),
-            content_routes: Arc::new(RwLock::new(ContentRuleSet::new())),
-            pattern_engine: Arc::new(SimdPatternMatcher::new()),
-            routing_cache,
-            load_balancer,
-            metrics: RoutingMetrics::default(),
+            enabled: true,
+            levels: 4,
+            bandwidth_allocation: vec![40.0, 30.0, 20.0, 10.0], // High to low priority
+            preemption_enabled: false,
+        }
+    }
+}
+
+/// Stream load metrics for routing decisions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamLoadMetrics {
+    /// Stream identifier
+    pub stream_id: StreamId,
+    /// Current load (messages per second)
+    pub current_load: f64,
+    /// Average load over the window
+    pub average_load: f64,
+    /// Peak load in the window
+    pub peak_load: f64,
+    /// Queue depth
+    pub queue_depth: usize,
+    /// Processing latency (ms)
+    pub latency_ms: f64,
+    /// Error rate (percentage)
+    pub error_rate: f64,
+    /// Available capacity (percentage)
+    pub available_capacity: f64,
+    /// Last update timestamp
+    pub last_update: Instant,
+    /// Geographic region (optional)
+    pub region: Option<String>,
+}
+
+impl StreamLoadMetrics {
+    pub fn new(stream_id: StreamId) -> Self {
+        Self {
+            stream_id,
+            current_load: 0.0,
+            average_load: 0.0,
+            peak_load: 0.0,
+            queue_depth: 0,
+            latency_ms: 0.0,
+            error_rate: 0.0,
+            available_capacity: 100.0,
+            last_update: Instant::now(),
+            region: None,
+        }
+    }
+
+    /// Calculate overall health score (0.0 = unhealthy, 1.0 = perfect)
+    pub fn health_score(&self) -> f64 {
+        let capacity_score = self.available_capacity / 100.0;
+        let latency_score = (200.0 - self.latency_ms.min(200.0)) / 200.0;
+        let error_score = (100.0 - self.error_rate.min(100.0)) / 100.0;
+
+        (capacity_score + latency_score + error_score) / 3.0
+    }
+
+    /// Check if stream is overloaded
+    pub fn is_overloaded(&self) -> bool {
+        self.available_capacity < 10.0 || self.error_rate > 5.0 || self.latency_ms > 1000.0
+    }
+}
+
+/// Message metadata for routing decisions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageMetadata {
+    /// Message identifier
+    pub message_id: MessageId,
+    /// Message priority
+    pub priority: Priority,
+    /// Target stream hint
+    pub target_stream: Option<StreamId>,
+    /// Geographic origin
+    pub origin_region: Option<String>,
+    /// Message size in bytes
+    pub size_bytes: usize,
+    /// Processing deadline
+    pub deadline: Option<Instant>,
+    /// Routing tags for custom logic
+    pub tags: HashMap<String, String>,
+}
+
+/// Routing result containing target stream and metadata
+#[derive(Debug, Clone)]
+pub struct RoutingResult {
+    /// Target stream for message
+    pub target_stream: StreamId,
+    /// Routing strategy used
+    pub strategy_used: RoutingStrategy,
+    /// Confidence score (0.0 - 1.0)
+    pub confidence: f64,
+    /// Estimated processing latency
+    pub estimated_latency: Duration,
+    /// Alternative streams (for failover)
+    pub alternatives: Vec<StreamId>,
+}
+
+/// High-performance message router with intelligent distribution
+pub struct IntelligentRouter {
+    /// Router configuration
+    config: RoutingConfig,
+    /// Available streams with their load metrics
+    streams: Arc<RwLock<HashMap<StreamId, StreamLoadMetrics>>>,
+    /// Round-robin counter
+    round_robin_counter: AtomicU64,
+    /// Consistent hash ring
+    hash_ring: Arc<RwLock<ConsistentHashRing>>,
+    /// Priority queues for each priority level
+    priority_queues: Arc<RwLock<BTreeMap<Priority, VecDeque<MessageMetadata>>>>,
+    /// Routing statistics
+    stats: Arc<RwLock<RoutingStats>>,
+    /// Geographic region mapping
+    region_mapping: Arc<RwLock<HashMap<String, Vec<StreamId>>>>,
+}
+
+impl IntelligentRouter {
+    /// Create a new intelligent router
+    pub fn new(config: RoutingConfig) -> Self {
+        Self {
             config,
+            streams: Arc::new(RwLock::new(HashMap::new())),
+            round_robin_counter: AtomicU64::new(0),
+            hash_ring: Arc::new(RwLock::new(ConsistentHashRing::new())),
+            priority_queues: Arc::new(RwLock::new(BTreeMap::new())),
+            stats: Arc::new(RwLock::new(RoutingStats::new())),
+            region_mapping: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
-    /// Route a message with <100ns routing decision time
-    pub async fn route_message(&self, message: &Message) -> RoutingResult<RouteDecision> {
-        let start = Instant::now();
-        
-        // Create route key for caching
-        let route_key = RouteKey::from_message(message);
-        
-        // Check cache first if enabled
-        if self.config.enable_caching {
-            let cache = self.routing_cache.read();
-            if let Some(cached_decision) = cache.peek(&route_key) {
-                let mut decision = cached_decision.clone();
-                decision.cache_hit = true;
-                decision.set_timing(start);
-                
-                self.metrics.record_routing(
-                    decision.decision_time_ns,
-                    decision.routing_type,
-                    true,
-                );
-                
-                return Ok(decision);
-            }
+
+    /// Add a stream to the routing table
+    pub async fn add_stream(&self, stream_id: StreamId, region: Option<String>) -> Result<()> {
+        let mut metrics = StreamLoadMetrics::new(stream_id);
+        metrics.region = region.clone();
+
+        {
+            let mut streams = self.streams.write().await;
+            streams.insert(stream_id, metrics);
         }
-        
-        // Perform routing decision
-        let mut decision = self.perform_routing(message).await?;
-        decision.cache_hit = false;
-        decision.set_timing(start);
-        
-        // Cache the decision if enabled
-        if self.config.enable_caching && !decision.target_streams.is_empty() {
-            let mut cache = self.routing_cache.write();
-            cache.put(route_key, decision.clone());
+
+        // Add to hash ring
+        {
+            let mut hash_ring = self.hash_ring.write().await;
+            hash_ring.add_node(stream_id);
         }
-        
-        self.metrics.record_routing(
-            decision.decision_time_ns,
-            decision.routing_type,
-            false,
-        );
-        
-        Ok(decision)
-    }
-    
-    /// Add a topic-based route
-    pub fn add_topic_route(&self, topic: Topic, stream_id: StreamId) -> RoutingResult<()> {
-        if self.topic_routes.len() >= self.config.max_topic_routes {
-            return Err(RoutingError::RoutingTableFull {
-                current: self.topic_routes.len(),
-                max: self.config.max_topic_routes,
-            });
+
+        // Update region mapping
+        if let Some(region) = region {
+            let mut region_mapping = self.region_mapping.write().await;
+            region_mapping.entry(region).or_insert_with(Vec::new).push(stream_id);
         }
-        
-        self.topic_routes
-            .entry(topic)
-            .or_insert_with(Vec::new)
-            .push(stream_id);
-        
+
+        tracing::info!("Added stream {} to router", stream_id);
         Ok(())
     }
-    
-    /// Remove a topic-based route
-    pub fn remove_topic_route(&self, topic: &Topic, stream_id: StreamId) -> RoutingResult<()> {
-        if let Some(mut routes) = self.topic_routes.get_mut(topic) {
-            routes.retain(|&id| id != stream_id);
-            if routes.is_empty() {
-                drop(routes);
-                self.topic_routes.remove(topic);
+
+    /// Remove a stream from the routing table
+    pub async fn remove_stream(&self, stream_id: StreamId) -> Result<()> {
+        // Remove from streams
+        let region = {
+            let mut streams = self.streams.write().await;
+            streams.remove(&stream_id).map(|m| m.region)
+        };
+
+        // Remove from hash ring
+        {
+            let mut hash_ring = self.hash_ring.write().await;
+            hash_ring.remove_node(stream_id);
+        }
+
+        // Update region mapping
+        if let Some(Some(region)) = region {
+            let mut region_mapping = self.region_mapping.write().await;
+            if let Some(streams) = region_mapping.get_mut(&region) {
+                streams.retain(|&id| id != stream_id);
+                if streams.is_empty() {
+                    region_mapping.remove(&region);
+                }
             }
-            Ok(())
+        }
+
+        tracing::info!("Removed stream {} from router", stream_id);
+        Ok(())
+    }
+
+    /// Update stream load metrics
+    pub async fn update_stream_metrics(&self, metrics: StreamLoadMetrics) -> Result<()> {
+        let mut streams = self.streams.write().await;
+        streams.insert(metrics.stream_id, metrics);
+        Ok(())
+    }
+
+    /// Route a message to the optimal stream
+    pub async fn route_message(&self, metadata: MessageMetadata) -> Result<RoutingResult> {
+        let mut stats = self.stats.write().await;
+        stats.total_requests += 1;
+
+        let start_time = Instant::now();
+
+        // Try primary strategy first
+        let result = match self.config.strategy {
+            RoutingStrategy::RoundRobin => self.route_round_robin().await,
+            RoutingStrategy::LeastLoaded => self.route_least_loaded().await,
+            RoutingStrategy::ConsistentHash => self.route_consistent_hash(&metadata).await,
+            RoutingStrategy::Geographic => self.route_geographic(&metadata).await,
+            RoutingStrategy::PriorityBased => self.route_priority_based(&metadata).await,
+            RoutingStrategy::Adaptive => self.route_adaptive(&metadata).await,
+            RoutingStrategy::Custom => self.route_custom(&metadata).await,
+        };
+
+        let routing_result = match result {
+            Ok(result) => result,
+            Err(_) if self.config.fallback_strategy.is_some() => {
+                // Try fallback strategy
+                stats.fallback_used += 1;
+                let fallback = self.config.fallback_strategy.unwrap();
+                match fallback {
+                    RoutingStrategy::RoundRobin => self.route_round_robin().await?,
+                    RoutingStrategy::LeastLoaded => self.route_least_loaded().await?,
+                    _ => return Err(Error::Runtime("No viable routing strategy".to_string())),
+                }
+            },
+            Err(e) => return Err(e),
+        };
+
+        let routing_latency = start_time.elapsed();
+        stats.total_latency += routing_latency;
+        stats.successful_routes += 1;
+
+        Ok(routing_result)
+    }
+
+    /// Round-robin routing
+    async fn route_round_robin(&self) -> Result<RoutingResult> {
+        let streams = self.streams.read().await;
+        let stream_ids: Vec<StreamId> = streams.keys().copied().collect();
+
+        if stream_ids.is_empty() {
+            return Err(Error::Runtime("No streams available for routing".to_string()));
+        }
+
+        let index = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
+        let target_stream = stream_ids[index % stream_ids.len()];
+
+        Ok(RoutingResult {
+            target_stream,
+            strategy_used: RoutingStrategy::RoundRobin,
+            confidence: 0.7,
+            estimated_latency: Duration::from_millis(50),
+            alternatives: stream_ids.into_iter().filter(|&s| s != target_stream).collect(),
+        })
+    }
+
+    /// Least-loaded routing
+    async fn route_least_loaded(&self) -> Result<RoutingResult> {
+        let streams = self.streams.read().await;
+
+        if streams.is_empty() {
+            return Err(Error::Runtime("No streams available for routing".to_string()));
+        }
+
+        // Find stream with highest available capacity and lowest load
+        let (target_stream, metrics) = streams
+            .iter()
+            .filter(|(_, m)| !m.is_overloaded())
+            .max_by(|(_, a), (_, b)| {
+                let score_a = a.health_score();
+                let score_b = b.health_score();
+                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .ok_or_else(|| Error::Runtime("No healthy streams available".to_string()))?;
+
+        Ok(RoutingResult {
+            target_stream: *target_stream,
+            strategy_used: RoutingStrategy::LeastLoaded,
+            confidence: metrics.health_score(),
+            estimated_latency: Duration::from_millis(metrics.latency_ms as u64),
+            alternatives: streams.keys().copied().filter(|&s| s != *target_stream).collect(),
+        })
+    }
+
+    /// Consistent hash routing
+    async fn route_consistent_hash(&self, metadata: &MessageMetadata) -> Result<RoutingResult> {
+        let hash_ring = self.hash_ring.read().await;
+        let target_stream = hash_ring
+            .get_node(&metadata.message_id.to_string())
+            .ok_or_else(|| Error::Runtime("No nodes in hash ring".to_string()))?;
+
+        Ok(RoutingResult {
+            target_stream,
+            strategy_used: RoutingStrategy::ConsistentHash,
+            confidence: 0.9, // Consistent hashing is very reliable
+            estimated_latency: Duration::from_millis(30),
+            alternatives: vec![], // Consistent hashing doesn't provide alternatives
+        })
+    }
+
+    /// Geographic routing
+    async fn route_geographic(&self, metadata: &MessageMetadata) -> Result<RoutingResult> {
+        if let Some(ref origin_region) = metadata.origin_region {
+            let region_mapping = self.region_mapping.read().await;
+            if let Some(region_streams) = region_mapping.get(origin_region) {
+                if !region_streams.is_empty() {
+                    // Use least-loaded within the region
+                    let streams = self.streams.read().await;
+                    let (target_stream, metrics) = region_streams
+                        .iter()
+                        .filter_map(|&stream_id| streams.get(&stream_id).map(|m| (stream_id, m)))
+                        .filter(|(_, m)| !m.is_overloaded())
+                        .max_by(|(_, a), (_, b)| {
+                            a.health_score()
+                                .partial_cmp(&b.health_score())
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .ok_or_else(|| {
+                            Error::Runtime("No healthy streams in region".to_string())
+                        })?;
+
+                    return Ok(RoutingResult {
+                        target_stream,
+                        strategy_used: RoutingStrategy::Geographic,
+                        confidence: metrics.health_score(),
+                        estimated_latency: Duration::from_millis(metrics.latency_ms as u64 / 2), // Local region
+                        alternatives: region_streams
+                            .iter()
+                            .copied()
+                            .filter(|&s| s != target_stream)
+                            .collect(),
+                    });
+                }
+            }
+        }
+
+        // Fallback to least-loaded if no geographic info
+        self.route_least_loaded().await
+    }
+
+    /// Priority-based routing
+    async fn route_priority_based(&self, metadata: &MessageMetadata) -> Result<RoutingResult> {
+        // For now, use least-loaded but with priority awareness
+        // In a full implementation, this would maintain separate queues per priority
+        let result = self.route_least_loaded().await?;
+        Ok(RoutingResult { strategy_used: RoutingStrategy::PriorityBased, ..result })
+    }
+
+    /// Adaptive routing that switches strategies based on conditions
+    async fn route_adaptive(&self, metadata: &MessageMetadata) -> Result<RoutingResult> {
+        let streams = self.streams.read().await;
+        let avg_load: f64 =
+            streams.values().map(|m| m.current_load).sum::<f64>() / streams.len() as f64;
+
+        // Use different strategies based on system load
+        if avg_load > 1000.0 {
+            // High load - use least loaded
+            drop(streams);
+            self.route_least_loaded().await
+        } else if metadata.origin_region.is_some() {
+            // Normal load with geographic info - use geographic routing
+            drop(streams);
+            self.route_geographic(metadata).await
         } else {
-            Err(RoutingError::NoRoutesFound { topic: topic.clone() })
+            // Normal load - use consistent hashing for better distribution
+            drop(streams);
+            self.route_consistent_hash(metadata).await
         }
     }
-    
-    /// Add a content-based route
-    pub fn add_content_route(&self, rule: ContentRule) -> RoutingResult<()> {
-        let mut content_routes = self.content_routes.write();
-        
-        if content_routes.rule_count >= self.config.max_content_rules {
-            return Err(RoutingError::RoutingTableFull {
-                current: content_routes.rule_count,
-                max: self.config.max_content_rules,
-            });
+
+    /// Custom routing (placeholder for user-defined logic)
+    async fn route_custom(&self, _metadata: &MessageMetadata) -> Result<RoutingResult> {
+        // Fallback to least-loaded for now
+        self.route_least_loaded().await
+    }
+
+    /// Get routing statistics
+    pub async fn get_stats(&self) -> RoutingStats {
+        self.stats.read().await.clone()
+    }
+
+    /// Get current stream metrics
+    pub async fn get_stream_metrics(&self) -> HashMap<StreamId, StreamLoadMetrics> {
+        self.streams.read().await.clone()
+    }
+}
+
+/// Consistent hash ring implementation
+#[derive(Debug)]
+struct ConsistentHashRing {
+    ring: BTreeMap<u64, StreamId>,
+    nodes: HashMap<StreamId, Vec<u64>>,
+    virtual_nodes: usize,
+}
+
+impl ConsistentHashRing {
+    fn new() -> Self {
+        Self {
+            ring: BTreeMap::new(),
+            nodes: HashMap::new(),
+            virtual_nodes: 150, // Number of virtual nodes per physical node
         }
-        
-        content_routes.add_rule(rule)?;
-        self.metrics.record_pattern_compilation();
-        Ok(())
     }
-    
-    /// Warm the routing cache with common patterns
-    pub fn warm_routing_cache(&self, patterns: Vec<RouteKey>) {
-        // Pre-populate cache with expected routing patterns
-        // This would typically be done during system startup
-        for key in patterns {
-            // Cache warming logic would go here
-            // For now, just record the attempt
-            let _ = key;
+
+    fn add_node(&mut self, node: StreamId) {
+        let mut hashes = Vec::new();
+        for i in 0..self.virtual_nodes {
+            let hash = self.hash(&format!("{}:{}", node, i));
+            self.ring.insert(hash, node);
+            hashes.push(hash);
         }
+        self.nodes.insert(node, hashes);
     }
-    
-    /// Optimize the routing table for better performance
-    pub fn optimize_routing_table(&self) -> RoutingResult<()> {
-        // Routing table optimization could include:
-        // - Reordering rules by frequency
-        // - Compiling complex patterns
-        // - Updating load balancer weights
-        
-        // For now, just clear old cache entries
-        if self.config.enable_caching {
-            let mut cache = self.routing_cache.write();
-            cache.clear();
-        }
-        
-        Ok(())
-    }
-    
-    /// Get routing metrics
-    pub fn get_metrics(&self) -> &RoutingMetrics {
-        &self.metrics
-    }
-    
-    /// Check router health
-    pub fn health_check(&self) -> bool {
-        let avg_routing_time = self.metrics.get_average_routing_time_ns();
-        let error_rate = self.metrics.get_error_rate();
-        let cache_hit_rate = self.metrics.get_cache_hit_rate();
-        
-        // Health criteria
-        avg_routing_time <= 200 && // Target: <100ns, warning: <200ns
-        error_rate <= 0.01 && // Less than 1% error rate
-        (cache_hit_rate >= 0.8 || !self.config.enable_caching) // Good cache performance
-    }
-    
-    /// Update load balancer stream health
-    pub fn update_stream_health(&self, stream_id: StreamId, healthy: bool) {
-        let mut load_balancer = self.load_balancer.write();
-        load_balancer.update_health(stream_id, healthy);
-    }
-    
-    /// Add stream to load balancer
-    pub fn add_load_balanced_stream(&self, stream_id: StreamId, weight: u32) {
-        let mut load_balancer = self.load_balancer.write();
-        load_balancer.add_stream(stream_id, weight);
-    }
-    
-    /// Remove stream from load balancer
-    pub fn remove_load_balanced_stream(&self, stream_id: StreamId) {
-        let mut load_balancer = self.load_balancer.write();
-        load_balancer.remove_stream(stream_id);
-    }
-    
-    // Private helper methods
-    
-    /// Perform the actual routing logic
-    async fn perform_routing(&self, message: &Message) -> RoutingResult<RouteDecision> {
-        // Try topic-based routing first (fastest)
-        if let Some(topic_targets) = self.route_by_topic(message) {
-            let mut decision = RouteDecision::new(RoutingType::TopicBased);
-            for target in topic_targets {
-                decision.add_target(target);
-            }
-            if !decision.target_streams.is_empty() {
-                return Ok(decision);
+
+    fn remove_node(&mut self, node: StreamId) {
+        if let Some(hashes) = self.nodes.remove(&node) {
+            for hash in hashes {
+                self.ring.remove(&hash);
             }
         }
-        
-        // Try content-based routing
-        if let Some(content_targets) = self.route_by_content(message).await? {
-            let mut decision = RouteDecision::new(RoutingType::ContentBased);
-            for target in content_targets {
-                decision.add_target(target);
-            }
-            if !decision.target_streams.is_empty() {
-                return Ok(decision);
-            }
-        }
-        
-        // Fallback to load-balanced routing
-        if let Some(lb_target) = self.route_by_load_balance(message) {
-            let mut decision = RouteDecision::new(RoutingType::LoadBalanced);
-            decision.add_target(lb_target);
-            return Ok(decision);
-        }
-        
-        // No routes found
-        Err(RoutingError::NoRoutesFound { topic: message.topic.clone() })
     }
-    
-    /// Route by topic (fastest path)
-    fn route_by_topic(&self, message: &Message) -> Option<Vec<StreamId>> {
-        self.topic_routes.get(&message.topic).map(|routes| routes.clone())
-    }
-    
-    /// Route by content using pattern matching
-    async fn route_by_content(&self, message: &Message) -> RoutingResult<Option<Vec<StreamId>>> {
-        let content_routes = self.content_routes.read();
-        let matches = content_routes.match_content(&message.payload);
-        
-        if matches.is_empty() {
-            return Ok(None);
+
+    fn get_node(&self, key: &str) -> Option<StreamId> {
+        if self.ring.is_empty() {
+            return None;
         }
-        
-        let mut targets = Vec::new();
-        for rule in matches {
-            targets.extend_from_slice(&rule.target_streams);
+
+        let hash = self.hash(key);
+
+        // Find the first node with hash >= key hash
+        if let Some((_, &node)) = self.ring.range(hash..).next() {
+            Some(node)
+        } else {
+            // Wrap around to the first node
+            self.ring.values().next().copied()
         }
-        
-        // Remove duplicates
-        targets.sort_unstable();
-        targets.dedup();
-        
-        Ok(Some(targets))
     }
-    
-    /// Route using load balancing
-    fn route_by_load_balance(&self, message: &Message) -> Option<StreamId> {
-        let load_balancer = self.load_balancer.read();
-        load_balancer.select_stream(Some(&message.payload))
+
+    fn hash(&self, key: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// Routing statistics for monitoring and optimization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingStats {
+    /// Total routing requests
+    pub total_requests: u64,
+    /// Successful routes
+    pub successful_routes: u64,
+    /// Failed routes
+    pub failed_routes: u64,
+    /// Times fallback strategy was used
+    pub fallback_used: u64,
+    /// Total routing latency
+    pub total_latency: Duration,
+    /// Average routing latency
+    pub average_latency: Duration,
+    /// Strategy usage counts
+    pub strategy_usage: HashMap<String, u64>,
+}
+
+impl RoutingStats {
+    fn new() -> Self {
+        Self {
+            total_requests: 0,
+            successful_routes: 0,
+            failed_routes: 0,
+            fallback_used: 0,
+            total_latency: Duration::ZERO,
+            average_latency: Duration::ZERO,
+            strategy_usage: HashMap::new(),
+        }
+    }
+
+    /// Calculate average latency
+    pub fn calculate_average_latency(&mut self) {
+        if self.successful_routes > 0 {
+            self.average_latency = self.total_latency / self.successful_routes as u32;
+        }
+    }
+
+    /// Get success rate as percentage
+    pub fn success_rate(&self) -> f64 {
+        if self.total_requests == 0 {
+            0.0
+        } else {
+            (self.successful_routes as f64 / self.total_requests as f64) * 100.0
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::MessageBuilder;
-    
-    #[test]
-    fn test_router_creation() {
-        let config = RouterConfig::default();
-        let router = MessageRouter::new(config);
-        assert!(router.health_check());
-    }
-    
+    use crate::message::MessageId;
+
     #[tokio::test]
-    async fn test_topic_routing() {
-        let config = RouterConfig::default();
-        let router = MessageRouter::new(config);
-        
-        // Add topic route
-        assert!(router.add_topic_route("test.topic".to_string(), 123).is_ok());
-        
-        // Create test message
-        let message = MessageBuilder::new()
-            .topic("test.topic")
-            .payload(b"test payload")
-            .build()
-            .unwrap();
-        
-        // Route message
-        let decision = router.route_message(&message).await.unwrap();
-        assert_eq!(decision.routing_type, RoutingType::TopicBased);
-        assert_eq!(decision.target_streams.len(), 1);
-        assert_eq!(decision.target_streams[0], 123);
+    async fn test_router_creation() {
+        let config = RoutingConfig::default();
+        let router = IntelligentRouter::new(config);
+
+        let stats = router.get_stats().await;
+        assert_eq!(stats.total_requests, 0);
     }
-    
+
     #[tokio::test]
-    async fn test_content_routing() {
-        let config = RouterConfig::default();
-        let router = MessageRouter::new(config);
-        
-        // Add content rule
-        let rule = ContentRule::new(1, "important".to_string(), vec![456]);
-        assert!(router.add_content_route(rule).is_ok());
-        
-        // Create test message with matching content
-        let message = MessageBuilder::new()
-            .topic("any.topic")
-            .payload(b"this is important data")
-            .build()
-            .unwrap();
-        
-        // Route message
-        let decision = router.route_message(&message).await.unwrap();
-        assert_eq!(decision.routing_type, RoutingType::ContentBased);
-        assert_eq!(decision.target_streams.len(), 1);
-        assert_eq!(decision.target_streams[0], 456);
+    async fn test_add_remove_stream() {
+        let config = RoutingConfig::default();
+        let router = IntelligentRouter::new(config);
+
+        let stream_id = StreamId(1);
+        router.add_stream(stream_id, None).await.unwrap();
+
+        let metrics = router.get_stream_metrics().await;
+        assert!(metrics.contains_key(&stream_id));
+
+        router.remove_stream(stream_id).await.unwrap();
+        let metrics = router.get_stream_metrics().await;
+        assert!(!metrics.contains_key(&stream_id));
     }
-    
-    #[test]
-    fn test_load_balancer() {
-        let mut balancer = LoadBalancer::new(LoadBalanceStrategy::RoundRobin);
-        
-        // Add streams
-        balancer.add_stream(100, 1);
-        balancer.add_stream(200, 1);
-        balancer.add_stream(300, 1);
-        
-        // Test round-robin selection
-        let selections: HashSet<_> = (0..6)
-            .map(|_| balancer.select_stream(None).unwrap())
-            .collect();
-        
-        // Should select all three streams
-        assert_eq!(selections.len(), 3);
-        assert!(selections.contains(&100));
-        assert!(selections.contains(&200));
-        assert!(selections.contains(&300));
-    }
-    
-    #[test]
-    fn test_pattern_compilation() {
-        let matcher = SimdPatternMatcher::new();
-        
-        let pattern = "test.*pattern";
-        let compiled = matcher.compile_pattern(pattern).unwrap();
-        
-        assert_eq!(compiled.pattern, pattern);
-        assert!(!compiled.is_literal);
-    }
-    
-    #[test]
-    fn test_content_rule_set() {
-        let mut rule_set = ContentRuleSet::new();
-        
-        let rule1 = ContentRule::new(1, "error".to_string(), vec![100]);
-        let rule2 = ContentRule::new(2, "warning".to_string(), vec![200]);
-        
-        assert!(rule_set.add_rule(rule1).is_ok());
-        assert!(rule_set.add_rule(rule2).is_ok());
-        
-        let matches = rule_set.match_content(b"this is an error message");
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].rule_id, 1);
-    }
-    
-    #[test]
-    fn test_route_key_creation() {
-        let message = MessageBuilder::new()
-            .topic("test.topic")
-            .payload(b"test payload")
-            .build()
-            .unwrap();
-        
-        let key = RouteKey::from_message(&message);
-        assert_eq!(key.topic, Some("test.topic".to_string()));
-        assert!(key.content_hash != 0);
-    }
-    
+
     #[tokio::test]
-    async fn test_caching() {
-        let config = RouterConfig::default();
-        let router = MessageRouter::new(config);
-        
-        // Add topic route
-        assert!(router.add_topic_route("cache.test".to_string(), 789).is_ok());
-        
-        // Create test message
-        let message = MessageBuilder::new()
-            .topic("cache.test")
-            .payload(b"cached payload")
-            .build()
-            .unwrap();
-        
-        // First routing (cache miss)
-        let decision1 = router.route_message(&message).await.unwrap();
-        assert!(!decision1.cache_hit);
-        
-        // Second routing (cache hit)
-        let decision2 = router.route_message(&message).await.unwrap();
-        assert!(decision2.cache_hit);
-        
-        // Results should be the same
-        assert_eq!(decision1.target_streams, decision2.target_streams);
-        assert_eq!(decision1.routing_type, decision2.routing_type);
-    }
-    
-    #[test]
-    fn test_metrics() {
-        let config = RouterConfig::default();
-        let router = MessageRouter::new(config);
-        
-        let metrics = router.get_metrics();
-        assert_eq!(metrics.get_average_routing_time_ns(), 0);
-        assert_eq!(metrics.get_cache_hit_rate(), 0.0);
-        assert_eq!(metrics.get_error_rate(), 0.0);
-    }
-    
-    #[test]
-    fn test_performance_targets() {
-        let config = RouterConfig::default();
-        let router = MessageRouter::new(config);
-        
-        // Router should be healthy initially
-        assert!(router.health_check());
-        
-        // Should support many topic routes
-        for i in 0..1000 {
-            let topic = format!("topic.{}", i);
-            assert!(router.add_topic_route(topic, i).is_ok());
+    async fn test_round_robin_routing() {
+        let config = RoutingConfig { strategy: RoutingStrategy::RoundRobin, ..Default::default() };
+        let router = IntelligentRouter::new(config);
+
+        // Add multiple streams
+        for i in 1..=3 {
+            router.add_stream(StreamId(i), None).await.unwrap();
         }
-        
-        assert!(router.health_check());
+
+        let metadata = MessageMetadata {
+            message_id: MessageId::new(),
+            priority: Priority::Normal,
+            target_stream: None,
+            origin_region: None,
+            size_bytes: 1024,
+            deadline: None,
+            tags: HashMap::new(),
+        };
+
+        // Route multiple messages and verify distribution
+        let mut targets = Vec::new();
+        for _ in 0..6 {
+            let result = router.route_message(metadata.clone()).await.unwrap();
+            targets.push(result.target_stream);
+            assert_eq!(result.strategy_used, RoutingStrategy::RoundRobin);
+        }
+
+        // Should see all streams used in round-robin fashion
+        let unique_targets: std::collections::HashSet<_> = targets.into_iter().collect();
+        assert_eq!(unique_targets.len(), 3);
+    }
+
+    #[test]
+    fn test_consistent_hash_ring() {
+        let mut ring = ConsistentHashRing::new();
+
+        ring.add_node(StreamId(1));
+        ring.add_node(StreamId(2));
+        ring.add_node(StreamId(3));
+
+        // Test consistent mapping
+        let key = "test_key";
+        let node1 = ring.get_node(key).unwrap();
+        let node2 = ring.get_node(key).unwrap();
+        assert_eq!(node1, node2);
+
+        // Test removal
+        ring.remove_node(StreamId(2));
+        let node3 = ring.get_node(key).unwrap();
+        assert_ne!(node3, StreamId(2));
+    }
+
+    #[test]
+    fn test_stream_load_metrics() {
+        let mut metrics = StreamLoadMetrics::new(StreamId(1));
+
+        // Test healthy stream
+        assert!(metrics.health_score() > 0.8);
+        assert!(!metrics.is_overloaded());
+
+        // Test overloaded stream
+        metrics.available_capacity = 5.0;
+        metrics.error_rate = 10.0;
+        metrics.latency_ms = 2000.0;
+
+        assert!(metrics.health_score() < 0.5);
+        assert!(metrics.is_overloaded());
     }
 }

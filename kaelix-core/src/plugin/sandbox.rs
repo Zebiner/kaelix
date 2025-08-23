@@ -1,12 +1,12 @@
 //! Security isolation and sandboxing for plugins.
 
-use crate::plugin::{SandboxError};
+use crate::plugin::SandboxError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
@@ -79,9 +79,9 @@ pub struct PluginSandbox {
 impl PluginSandbox {
     /// Create a new plugin sandbox with the specified isolation level and limits.
     pub fn new(
-        isolation_level: IsolationLevel, 
-        resource_limits: ResourceLimits, 
-        capabilities: CapabilitySet
+        isolation_level: IsolationLevel,
+        resource_limits: ResourceLimits,
+        capabilities: CapabilitySet,
     ) -> Result<Self, SandboxError> {
         Ok(Self {
             isolation_level,
@@ -121,10 +121,11 @@ impl PluginSandbox {
         F: Future<Output = T>,
     {
         let start_time = Instant::now();
-        
+
         // Apply execution timeout
-        let operation_timeout = self.resource_limits.max_execution_time.unwrap_or(Duration::from_secs(30));
-        
+        let operation_timeout =
+            self.resource_limits.max_execution_time.unwrap_or(Duration::from_secs(30));
+
         let result = match timeout(operation_timeout, operation).await {
             Ok(result) => result,
             Err(_) => {
@@ -135,7 +136,7 @@ impl PluginSandbox {
                     limit: operation_timeout.as_millis() as u64,
                     usage: operation_timeout.as_millis() as u64 + 1,
                 });
-            }
+            },
         };
 
         let execution_time = start_time.elapsed();
@@ -157,7 +158,7 @@ impl PluginSandbox {
     /// Check sandbox health.
     pub fn health_check(&self) -> SandboxHealthReport {
         let stats = self.stats.snapshot();
-        
+
         SandboxHealthReport {
             isolation_level: self.isolation_level.clone(),
             memory_usage: 0, // Would implement actual memory measurement
@@ -190,7 +191,8 @@ impl Clone for PluginSandbox {
 
 impl Default for PluginSandbox {
     fn default() -> Self {
-        Self::new(IsolationLevel::None, ResourceLimits::default(), CapabilitySet::default()).unwrap()
+        Self::new(IsolationLevel::None, ResourceLimits::default(), CapabilitySet::default())
+            .unwrap()
     }
 }
 
@@ -378,10 +380,7 @@ pub enum NetworkAccess {
     None,
 
     /// Limited access to specific hosts/ports
-    Limited {
-        allowed_hosts: Vec<String>,
-        allowed_ports: Vec<u16>,
-    },
+    Limited { allowed_hosts: Vec<String>, allowed_ports: Vec<u16> },
 
     /// Full network access (use with caution)
     Full,
@@ -494,7 +493,7 @@ impl SandboxStats {
     /// Record an operation execution.
     fn record_execution(&self, duration: Duration, success: bool) {
         self.total_operations.fetch_add(1, Ordering::Relaxed);
-        
+
         if success {
             self.successful_operations.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -515,10 +514,10 @@ impl SandboxStats {
             | ViolationType::FileDescriptor
             | ViolationType::Network => {
                 self.resource_violations.fetch_add(1, Ordering::Relaxed);
-            }
+            },
             ViolationType::Capability => {
                 self.capability_violations.fetch_add(1, Ordering::Relaxed);
-            }
+            },
         }
     }
 
@@ -541,11 +540,15 @@ impl Clone for SandboxStats {
     fn clone(&self) -> Self {
         Self {
             total_operations: AtomicU64::new(self.total_operations.load(Ordering::Relaxed)),
-            successful_operations: AtomicU64::new(self.successful_operations.load(Ordering::Relaxed)),
+            successful_operations: AtomicU64::new(
+                self.successful_operations.load(Ordering::Relaxed),
+            ),
             failed_operations: AtomicU64::new(self.failed_operations.load(Ordering::Relaxed)),
             total_execution_time: self.total_execution_time.clone(),
             resource_violations: AtomicU64::new(self.resource_violations.load(Ordering::Relaxed)),
-            capability_violations: AtomicU64::new(self.capability_violations.load(Ordering::Relaxed)),
+            capability_violations: AtomicU64::new(
+                self.capability_violations.load(Ordering::Relaxed),
+            ),
         }
     }
 }
@@ -700,7 +703,8 @@ mod tests {
             IsolationLevel::None,
             ResourceLimits::conservative(),
             CapabilitySet::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let stats = sandbox.stats();
         assert_eq!(stats.total_operations, 0);
@@ -708,7 +712,7 @@ mod tests {
         assert_eq!(stats.total_violations, 0);
     }
 
-    #[test] 
+    #[test]
     fn test_sandbox_error_creation() {
         let resource_error = SandboxError::resource_limit("memory", 1000, 1500);
         assert!(resource_error.to_string().contains("memory"));

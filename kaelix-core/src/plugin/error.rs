@@ -86,7 +86,9 @@ pub enum PluginError {
     },
 
     /// Plugin compatibility errors
-    #[error("Plugin compatibility error: {plugin_id}, required_version: {required_version}, actual_version: {actual_version}")]
+    #[error(
+        "Plugin compatibility error: {plugin_id}, required_version: {required_version}, actual_version: {actual_version}"
+    )]
     CompatibilityError {
         /// Plugin identifier
         plugin_id: String,
@@ -106,7 +108,9 @@ pub enum PluginError {
     },
 
     /// Plugin resource limit exceeded
-    #[error("Plugin resource limit exceeded: {plugin_id}, resource: {resource}, limit: {limit}, actual: {actual}")]
+    #[error(
+        "Plugin resource limit exceeded: {plugin_id}, resource: {resource}, limit: {limit}, actual: {actual}"
+    )]
     ResourceLimitExceeded {
         /// Plugin identifier
         plugin_id: String,
@@ -277,7 +281,9 @@ pub enum LifecycleError {
     },
 
     /// Lifecycle operation failed
-    #[error("Lifecycle operation failed: {operation}, current_state: {current_state}, reason: {reason}")]
+    #[error(
+        "Lifecycle operation failed: {operation}, current_state: {current_state}, reason: {reason}"
+    )]
     OperationFailed {
         /// Operation that failed
         operation: String,
@@ -288,7 +294,9 @@ pub enum LifecycleError {
     },
 
     /// Restart policy violation
-    #[error("Restart policy violation: {plugin_id}, attempts: {attempts}, max_attempts: {max_attempts}")]
+    #[error(
+        "Restart policy violation: {plugin_id}, attempts: {attempts}, max_attempts: {max_attempts}"
+    )]
     RestartPolicyViolation {
         /// Plugin identifier
         plugin_id: String,
@@ -340,7 +348,9 @@ pub enum LoaderError {
     },
 
     /// Plugin dependency resolution failed
-    #[error("Plugin dependency resolution failed: {plugin_id}, missing_dependencies: {missing_dependencies:?}")]
+    #[error(
+        "Plugin dependency resolution failed: {plugin_id}, missing_dependencies: {missing_dependencies:?}"
+    )]
     DependencyResolutionFailed {
         /// Plugin identifier
         plugin_id: String,
@@ -378,7 +388,9 @@ pub enum LoaderError {
     },
 
     /// Plugin version incompatible
-    #[error("Plugin version incompatible: {plugin_id}, plugin_version: {plugin_version}, required_version: {required_version}")]
+    #[error(
+        "Plugin version incompatible: {plugin_id}, plugin_version: {plugin_version}, required_version: {required_version}"
+    )]
     VersionIncompatible {
         /// Plugin identifier
         plugin_id: String,
@@ -432,7 +444,9 @@ pub enum SandboxError {
     },
 
     /// Resource limit exceeded
-    #[error("Resource limit exceeded: {plugin_id}, resource: {resource}, limit: {limit}, usage: {usage}")]
+    #[error(
+        "Resource limit exceeded: {plugin_id}, resource: {resource}, limit: {limit}, usage: {usage}"
+    )]
     ResourceLimitExceeded {
         /// Plugin identifier
         plugin_id: String,
@@ -492,7 +506,9 @@ pub enum HookError {
     },
 
     /// Hook priority conflict
-    #[error("Hook priority conflict: {plugin_id}, hook_point: {hook_point}, conflicting_plugin: {conflicting_plugin}")]
+    #[error(
+        "Hook priority conflict: {plugin_id}, hook_point: {hook_point}, conflicting_plugin: {conflicting_plugin}"
+    )]
     PriorityConflict {
         /// Plugin identifier
         plugin_id: String,
@@ -559,7 +575,9 @@ pub enum ReloadError {
     },
 
     /// Version mismatch during reload
-    #[error("Version mismatch during reload: {plugin_id}, old_version: {old_version}, new_version: {new_version}")]
+    #[error(
+        "Version mismatch during reload: {plugin_id}, old_version: {old_version}, new_version: {new_version}"
+    )]
     VersionMismatch {
         /// Plugin identifier
         plugin_id: String,
@@ -651,7 +669,9 @@ pub enum EnforcementError {
     },
 
     /// Quota exceeded
-    #[error("Quota exceeded: {plugin_id}, quota_type: {quota_type}, limit: {limit}, usage: {usage}")]
+    #[error(
+        "Quota exceeded: {plugin_id}, quota_type: {quota_type}, limit: {limit}, usage: {usage}"
+    )]
     QuotaExceeded {
         /// Plugin identifier
         plugin_id: String,
@@ -664,7 +684,9 @@ pub enum EnforcementError {
     },
 
     /// Rate limit exceeded
-    #[error("Rate limit exceeded: {plugin_id}, operation: {operation}, limit: {limit}, window: {window}ms")]
+    #[error(
+        "Rate limit exceeded: {plugin_id}, operation: {operation}, limit: {limit}, window: {window}ms"
+    )]
     RateLimitExceeded {
         /// Plugin identifier
         plugin_id: String,
@@ -704,25 +726,17 @@ pub type EnforcementResult<T> = Result<T, EnforcementError>;
 impl PluginError {
     /// Create a registration error.
     pub fn registration(message: impl Into<String>) -> Self {
-        Self::Registration {
-            message: message.into(),
-        }
+        Self::Registration { message: message.into() }
     }
 
     /// Create a loading failed error.
     pub fn loading_failed(plugin_id: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::LoadingFailed {
-            plugin_id: plugin_id.into(),
-            reason: reason.into(),
-        }
+        Self::LoadingFailed { plugin_id: plugin_id.into(), reason: reason.into() }
     }
 
     /// Create an initialization failed error.
     pub fn initialization_failed(plugin_id: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::InitializationFailed {
-            plugin_id: plugin_id.into(),
-            reason: reason.into(),
-        }
+        Self::InitializationFailed { plugin_id: plugin_id.into(), reason: reason.into() }
     }
 
     /// Create an execution error.
@@ -744,33 +758,22 @@ impl PluginError {
         operation: impl Into<String>,
         timeout: u64,
     ) -> Self {
-        Self::TimeoutError {
-            plugin_id: plugin_id.into(),
-            operation: operation.into(),
-            timeout,
-        }
+        Self::TimeoutError { plugin_id: plugin_id.into(), operation: operation.into(), timeout }
     }
 
     /// Create a not found error.
     pub fn not_found(plugin_id: impl Into<String>) -> Self {
-        Self::NotFound {
-            plugin_id: plugin_id.into(),
-        }
+        Self::NotFound { plugin_id: plugin_id.into() }
     }
 
     /// Create an already exists error.
     pub fn already_exists(plugin_id: impl Into<String>) -> Self {
-        Self::AlreadyExists {
-            plugin_id: plugin_id.into(),
-        }
+        Self::AlreadyExists { plugin_id: plugin_id.into() }
     }
 
     /// Create an internal error.
     pub fn internal(operation: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::Internal {
-            operation: operation.into(),
-            reason: reason.into(),
-        }
+        Self::Internal { operation: operation.into(), reason: reason.into() }
     }
 }
 
@@ -833,23 +836,19 @@ impl From<LifecycleError> for PluginError {
                 operation: format!("transition_{}_{}", from, to),
                 timeout,
             },
-            LifecycleError::OperationFailed {
-                operation,
-                current_state,
-                reason,
-            } => Self::LifecycleError {
-                plugin_id: "unknown".to_string(),
-                state: current_state,
-                reason: format!("Operation '{}' failed: {}", operation, reason),
+            LifecycleError::OperationFailed { operation, current_state, reason } => {
+                Self::LifecycleError {
+                    plugin_id: "unknown".to_string(),
+                    state: current_state,
+                    reason: format!("Operation '{}' failed: {}", operation, reason),
+                }
             },
-            LifecycleError::RestartPolicyViolation {
-                plugin_id,
-                attempts,
-                max_attempts,
-            } => Self::LifecycleError {
-                plugin_id,
-                state: "failed".to_string(),
-                reason: format!("Restart attempts {}/{} exceeded", attempts, max_attempts),
+            LifecycleError::RestartPolicyViolation { plugin_id, attempts, max_attempts } => {
+                Self::LifecycleError {
+                    plugin_id,
+                    state: "failed".to_string(),
+                    reason: format!("Restart attempts {}/{} exceeded", attempts, max_attempts),
+                }
             },
             LifecycleError::HealthCheckFailed { plugin_id, reason } => Self::LifecycleError {
                 plugin_id,
@@ -875,13 +874,12 @@ impl From<LoaderError> for PluginError {
                 plugin_id: path,
                 violation: format!("Signature verification failed: {}", reason),
             },
-            LoaderError::DependencyResolutionFailed {
-                plugin_id,
-                missing_dependencies,
-            } => Self::DependencyError {
-                plugin_id,
-                dependency: missing_dependencies.join(", "),
-                reason: "Missing dependencies".to_string(),
+            LoaderError::DependencyResolutionFailed { plugin_id, missing_dependencies } => {
+                Self::DependencyError {
+                    plugin_id,
+                    dependency: missing_dependencies.join(", "),
+                    reason: "Missing dependencies".to_string(),
+                }
             },
             LoaderError::DynamicLibraryError { path, reason } => Self::LoadingFailed {
                 plugin_id: path,
@@ -896,22 +894,19 @@ impl From<LoaderError> for PluginError {
                 field,
                 reason: format!("Invalid metadata: {}", reason),
             },
-            LoaderError::VersionIncompatible {
-                plugin_id,
-                plugin_version,
-                required_version,
-            } => Self::CompatibilityError {
-                plugin_id,
-                required_version,
-                actual_version: plugin_version,
+            LoaderError::VersionIncompatible { plugin_id, plugin_version, required_version } => {
+                Self::CompatibilityError {
+                    plugin_id,
+                    required_version,
+                    actual_version: plugin_version,
+                }
             },
             LoaderError::PermissionDenied { path, reason } => Self::SecurityViolation {
                 plugin_id: path,
                 violation: format!("Permission denied: {}", reason),
             },
-            LoaderError::LoadingFailed { path, reason } => Self::LoadingFailed {
-                plugin_id: path,
-                reason,
+            LoaderError::LoadingFailed { path, reason } => {
+                Self::LoadingFailed { plugin_id: path, reason }
             },
         }
     }
@@ -924,35 +919,24 @@ impl From<SandboxError> for PluginError {
                 plugin_id,
                 reason: format!("Sandbox creation failed: {}", reason),
             },
-            SandboxError::EnforcementFailed {
-                plugin_id,
-                violation,
-            } => Self::SecurityViolation {
-                plugin_id,
-                violation,
+            SandboxError::EnforcementFailed { plugin_id, violation } => {
+                Self::SecurityViolation { plugin_id, violation }
             },
-            SandboxError::ResourceLimitExceeded {
-                plugin_id,
-                resource,
-                limit,
-                usage,
-            } => Self::ResourceLimitExceeded {
-                plugin_id,
-                resource,
-                limit: limit.to_string(),
-                actual: usage.to_string(),
+            SandboxError::ResourceLimitExceeded { plugin_id, resource, limit, usage } => {
+                Self::ResourceLimitExceeded {
+                    plugin_id,
+                    resource,
+                    limit: limit.to_string(),
+                    actual: usage.to_string(),
+                }
             },
-            SandboxError::CapabilityViolation {
-                plugin_id,
-                required_capability,
-            } => Self::SecurityViolation {
-                plugin_id,
-                violation: format!("Missing capability: {}", required_capability),
+            SandboxError::CapabilityViolation { plugin_id, required_capability } => {
+                Self::SecurityViolation {
+                    plugin_id,
+                    violation: format!("Missing capability: {}", required_capability),
+                }
             },
-            SandboxError::IsolationBreach {
-                plugin_id,
-                breach_type,
-            } => Self::SecurityViolation {
+            SandboxError::IsolationBreach { plugin_id, breach_type } => Self::SecurityViolation {
                 plugin_id,
                 violation: format!("Isolation breach: {}", breach_type),
             },
@@ -963,51 +947,34 @@ impl From<SandboxError> for PluginError {
 impl From<HookError> for PluginError {
     fn from(error: HookError) -> Self {
         match error {
-            HookError::RegistrationFailed {
-                plugin_id,
-                hook_point,
-                reason,
-            } => Self::Registration {
+            HookError::RegistrationFailed { plugin_id, hook_point, reason } => Self::Registration {
                 message: format!(
                     "Hook registration failed for plugin {} at {}: {}",
                     plugin_id, hook_point, reason
                 ),
             },
-            HookError::ExecutionFailed {
-                plugin_id,
-                hook_point,
-                reason,
-            } => Self::ExecutionError {
+            HookError::ExecutionFailed { plugin_id, hook_point, reason } => Self::ExecutionError {
                 plugin_id,
                 operation: format!("hook_{}", hook_point),
                 reason,
             },
-            HookError::PriorityConflict {
-                plugin_id,
-                hook_point,
-                conflicting_plugin,
-            } => Self::ConfigurationError {
-                plugin_id,
-                config_key: "hook_priority".to_string(),
-                reason: format!(
-                    "Priority conflict at {} with plugin {}",
-                    hook_point, conflicting_plugin
-                ),
+            HookError::PriorityConflict { plugin_id, hook_point, conflicting_plugin } => {
+                Self::ConfigurationError {
+                    plugin_id,
+                    config_key: "hook_priority".to_string(),
+                    reason: format!(
+                        "Priority conflict at {} with plugin {}",
+                        hook_point, conflicting_plugin
+                    ),
+                }
             },
-            HookError::ChainBroken {
-                hook_point,
-                failed_plugin,
-                reason,
-            } => Self::ExecutionError {
+            HookError::ChainBroken { hook_point, failed_plugin, reason } => Self::ExecutionError {
                 plugin_id: failed_plugin,
                 operation: format!("hook_chain_{}", hook_point),
                 reason,
             },
-            HookError::NotFound {
-                plugin_id,
-                hook_point,
-            } => Self::NotFound {
-                plugin_id: format!("{}::{}", plugin_id, hook_point),
+            HookError::NotFound { plugin_id, hook_point } => {
+                Self::NotFound { plugin_id: format!("{}::{}", plugin_id, hook_point) }
             },
         }
     }
@@ -1020,21 +987,30 @@ impl From<SecurityError> for PluginError {
                 plugin_id,
                 violation: format!("Authentication failed: {}", reason),
             },
-            SecurityError::AuthorizationFailed { plugin_id, operation, reason } => Self::SecurityViolation {
-                plugin_id,
-                violation: format!("Authorization failed for operation '{}': {}", operation, reason),
+            SecurityError::AuthorizationFailed { plugin_id, operation, reason } => {
+                Self::SecurityViolation {
+                    plugin_id,
+                    violation: format!(
+                        "Authorization failed for operation '{}': {}",
+                        operation, reason
+                    ),
+                }
             },
-            SecurityError::CertificateValidationFailed { plugin_id, reason } => Self::SecurityViolation {
-                plugin_id,
-                violation: format!("Certificate validation failed: {}", reason),
+            SecurityError::CertificateValidationFailed { plugin_id, reason } => {
+                Self::SecurityViolation {
+                    plugin_id,
+                    violation: format!("Certificate validation failed: {}", reason),
+                }
             },
             SecurityError::CryptographicOperationFailed { operation, reason } => Self::Internal {
                 operation,
                 reason: format!("Cryptographic operation failed: {}", reason),
             },
-            SecurityError::TrustVerificationFailed { plugin_id, reason } => Self::SecurityViolation {
-                plugin_id,
-                violation: format!("Trust verification failed: {}", reason),
+            SecurityError::TrustVerificationFailed { plugin_id, reason } => {
+                Self::SecurityViolation {
+                    plugin_id,
+                    violation: format!("Trust verification failed: {}", reason),
+                }
             },
         }
     }
@@ -1064,9 +1040,7 @@ mod tests {
         let plugin_error: PluginError = io_error.into();
         assert!(plugin_error.to_string().contains("File not found"));
 
-        let registry_error = RegistryError::NotFound {
-            plugin_id: "test-plugin".to_string(),
-        };
+        let registry_error = RegistryError::NotFound { plugin_id: "test-plugin".to_string() };
         let plugin_error: PluginError = registry_error.into();
         assert!(plugin_error.to_string().contains("test-plugin"));
     }

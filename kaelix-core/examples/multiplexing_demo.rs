@@ -2,14 +2,25 @@
 //!
 //! Demonstrates the ultra-high-performance stream multiplexing capabilities
 //! of MemoryStreamer with comprehensive testing and benchmarking.
+//! 
+//! Note: This example requires the 'experimental' feature flag to be enabled.
 
+#[cfg(feature = "experimental")]
+use kaelix_core::{Message, Topic};
+#[cfg(feature = "experimental")]
 use kaelix_core::multiplexing::*;
-use kaelix_core::message::{Message, MessageBuilder};
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "experimental")]
 use std::sync::Arc;
+#[cfg(feature = "experimental")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "experimental")]
 use std::time::{Duration, Instant};
+#[cfg(feature = "experimental")]
 use tokio::time::timeout;
+#[cfg(feature = "experimental")]
+use bytes::Bytes;
 
+#[cfg(feature = "experimental")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 MemoryStreamer Stream Multiplexing Demo");
@@ -56,6 +67,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(not(feature = "experimental"))]
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("❌ Stream Multiplexing Demo requires the 'experimental' feature");
+    println!("Please run with: cargo run --example multiplexing_demo --features experimental");
+    Ok(())
+}
+
+#[cfg(feature = "experimental")]
 async fn test_basic_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
     let config = MultiplexerConfig::default();
     let multiplexer = StreamMultiplexer::new(config)?;
@@ -74,11 +94,12 @@ async fn test_basic_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test shutdown
     multiplexer.shutdown().await?;
-    
+
     println!("  ✓ Multiplexer lifecycle operations working correctly");
     Ok(())
 }
 
+#[cfg(feature = "experimental")]
 async fn test_stream_creation() -> Result<(), Box<dyn std::error::Error>> {
     let config = MultiplexerConfig::default();
     let multiplexer = StreamMultiplexer::new(config)?;
@@ -88,7 +109,7 @@ async fn test_stream_creation() -> Result<(), Box<dyn std::error::Error>> {
     let high_priority_config = StreamConfig::new()
         .with_priority(StreamPriority::High)
         .with_topics(vec!["orders.high".to_string()]);
-    
+
     let normal_priority_config = StreamConfig::new()
         .with_priority(StreamPriority::Normal)
         .with_topics(vec!["orders.normal".to_string()]);
@@ -111,35 +132,35 @@ async fn test_stream_creation() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(high_stream_ref.state(), StreamState::Active);
 
     multiplexer.shutdown().await?;
-    
+
     println!("  ✓ Created {} streams with different priorities", 3);
     println!("  ✓ Stream properties verified correctly");
     Ok(())
 }
 
+#[cfg(feature = "experimental")]
 async fn test_message_routing() -> Result<(), Box<dyn std::error::Error>> {
     let config = MultiplexerConfig::default();
     let multiplexer = StreamMultiplexer::new(config)?;
     multiplexer.start().await?;
 
     // Create streams with specific topics
-    let order_stream_config = StreamConfig::new()
-        .with_topics(vec!["orders.created".to_string()]);
+    let order_stream_config = StreamConfig::new().with_topics(vec!["orders.created".to_string()]);
     let order_stream = multiplexer.create_stream(order_stream_config).await?;
 
-    let analytics_stream_config = StreamConfig::new()
-        .with_topics(vec!["analytics.events".to_string()]);
+    let analytics_stream_config =
+        StreamConfig::new().with_topics(vec!["analytics.events".to_string()]);
     let analytics_stream = multiplexer.create_stream(analytics_stream_config).await?;
 
-    // Send messages
-    let order_message = MessageBuilder::new()
+    // Send messages using the correct API
+    let order_message = Message::builder()
         .topic("orders.created")
-        .payload(b"Order #12345 created")
+        .payload(Bytes::from("Order #12345 created"))
         .build()?;
 
-    let analytics_message = MessageBuilder::new()
+    let analytics_message = Message::builder()
         .topic("analytics.events")
-        .payload(b"User clicked button")
+        .payload(Bytes::from("User clicked button"))
         .build()?;
 
     // Route messages to streams
@@ -152,12 +173,13 @@ async fn test_message_routing() -> Result<(), Box<dyn std::error::Error>> {
     assert!(metrics.messages_processed > 0, "Order stream should have processed messages");
 
     multiplexer.shutdown().await?;
-    
+
     println!("  ✓ Messages routed correctly to appropriate streams");
     println!("  ✓ Stream metrics updated properly");
     Ok(())
 }
 
+#[cfg(feature = "experimental")]
 async fn test_performance_benchmarks() -> Result<(), Box<dyn std::error::Error>> {
     let config = MultiplexerConfig::default();
     let multiplexer = StreamMultiplexer::new(config)?;
@@ -167,90 +189,99 @@ async fn test_performance_benchmarks() -> Result<(), Box<dyn std::error::Error>>
     println!("  📊 Benchmark 1: Stream Creation Performance");
     let stream_count = 1000;
     let start = Instant::now();
-    
+
     for i in 0..stream_count {
-        let config = StreamConfig::new()
-            .with_topics(vec![format!("benchmark.topic.{}", i)]);
+        let config = StreamConfig::new().with_topics(vec![format!("benchmark.topic.{}", i)]);
         multiplexer.create_stream(config).await?;
     }
-    
+
     let creation_time = start.elapsed();
     let avg_creation_time = creation_time / stream_count;
-    
+
     println!("    Created {} streams in {:?}", stream_count, creation_time);
     println!("    Average creation time: {:?}", avg_creation_time);
-    
+
     // Target: <1μs per stream (though this is optimistic in a real scenario)
-    assert!(avg_creation_time < Duration::from_micros(100), 
-            "Stream creation should be fast (got {:?})", avg_creation_time);
+    assert!(
+        avg_creation_time < Duration::from_micros(100),
+        "Stream creation should be fast (got {:?})",
+        avg_creation_time
+    );
 
     // Benchmark 2: Message Sending Performance
     println!("  📊 Benchmark 2: Message Sending Performance");
     let message_count = 10000;
-    let test_stream_config = StreamConfig::new()
-        .with_topics(vec!["benchmark.messages".to_string()]);
+    let test_stream_config =
+        StreamConfig::new().with_topics(vec!["benchmark.messages".to_string()]);
     let test_stream = multiplexer.create_stream(test_stream_config).await?;
-    
+
     let start = Instant::now();
     for i in 0..message_count {
-        let message = MessageBuilder::new()
+        let message = Message::builder()
             .topic("benchmark.messages")
-            .payload(format!("Message {}", i).as_bytes())
+            .payload(Bytes::from(format!("Message {}", i)))
             .build()?;
         multiplexer.send_to_stream(test_stream, message).await?;
     }
     let sending_time = start.elapsed();
     let avg_send_time = sending_time / message_count;
-    
+
     println!("    Sent {} messages in {:?}", message_count, sending_time);
     println!("    Average send time: {:?}", avg_send_time);
-    
+
     // Target: <10μs per message
-    assert!(avg_send_time < Duration::from_micros(50), 
-            "Message sending should be fast (got {:?})", avg_send_time);
+    assert!(
+        avg_send_time < Duration::from_micros(50),
+        "Message sending should be fast (got {:?})",
+        avg_send_time
+    );
 
     // Benchmark 3: Stream Lookup Performance
     println!("  📊 Benchmark 3: Stream Lookup Performance");
     let lookup_count = 100000;
     let lookup_stream = multiplexer.create_stream(StreamConfig::new()).await?;
-    
+
     let start = Instant::now();
     for _ in 0..lookup_count {
         let _stream_ref = multiplexer.get_stream(lookup_stream).await?;
     }
     let lookup_time = start.elapsed();
     let avg_lookup_time = lookup_time / lookup_count;
-    
+
     println!("    Performed {} lookups in {:?}", lookup_count, lookup_time);
     println!("    Average lookup time: {:?}", avg_lookup_time);
-    
+
     // Target: <10ns lookup time (this is very aggressive)
-    assert!(avg_lookup_time < Duration::from_micros(1), 
-            "Stream lookup should be fast (got {:?})", avg_lookup_time);
+    assert!(
+        avg_lookup_time < Duration::from_micros(1),
+        "Stream lookup should be fast (got {:?})",
+        avg_lookup_time
+    );
 
     multiplexer.shutdown().await?;
-    
+
     println!("  ✅ All performance benchmarks within acceptable limits");
     Ok(())
 }
 
+#[cfg(feature = "experimental")]
 async fn test_stream_groups() -> Result<(), Box<dyn std::error::Error>> {
     let config = MultiplexerConfig::default();
     let multiplexer = StreamMultiplexer::new(config)?;
     multiplexer.start().await?;
 
     // Create streams for pipeline processing
-    let producer_stream = multiplexer.create_stream(
-        StreamConfig::new().with_topics(vec!["pipeline.input".to_string()])
-    ).await?;
-    
-    let processor_stream = multiplexer.create_stream(
-        StreamConfig::new().with_topics(vec!["pipeline.process".to_string()])
-    ).await?;
-    
-    let consumer_stream = multiplexer.create_stream(
-        StreamConfig::new().with_topics(vec!["pipeline.output".to_string()])
-    ).await?;
+    let producer_stream = multiplexer
+        .create_stream(StreamConfig::new().with_topics(vec!["pipeline.input".to_string()]))
+        .await?;
+
+    let processor_stream = multiplexer
+        .create_stream(StreamConfig::new().with_topics(vec!["pipeline.process".to_string()]))
+        .await?;
+
+    let consumer_stream = multiplexer
+        .create_stream(StreamConfig::new().with_topics(vec!["pipeline.output".to_string()]))
+        .await?;
 
     // Create pipeline group
     let pipeline_config = StreamGroupConfig {
@@ -282,20 +313,20 @@ async fn test_stream_groups() -> Result<(), Box<dyn std::error::Error>> {
     assert_ne!(group_id, fanout_group_id, "Group IDs should be unique");
 
     multiplexer.shutdown().await?;
-    
+
     println!("  ✓ Created pipeline and fan-out stream groups");
     println!("  ✓ Stream dependencies configured correctly");
     Ok(())
 }
 
+#[cfg(feature = "experimental")]
 async fn test_backpressure_management() -> Result<(), Box<dyn std::error::Error>> {
     let config = MultiplexerConfig::default();
     let multiplexer = StreamMultiplexer::new(config)?;
     multiplexer.start().await?;
 
     // Create a stream for backpressure testing
-    let stream_config = StreamConfig::new()
-        .with_topics(vec!["backpressure.test".to_string()]);
+    let stream_config = StreamConfig::new().with_topics(vec!["backpressure.test".to_string()]);
     let test_stream = multiplexer.create_stream(stream_config).await?;
 
     // Test credit allocation and consumption
@@ -303,23 +334,23 @@ async fn test_backpressure_management() -> Result<(), Box<dyn std::error::Error>
     assert!(initial_credits > 0, "Stream should have initial credits");
 
     // Allocate more credits
-    multiplexer.backpressure_manager
-        .allocate_credits(test_stream, 500).await?;
-    
+    multiplexer.backpressure_manager.allocate_credits(test_stream, 500).await?;
+
     let after_allocation = multiplexer.backpressure_manager.get_available_credits(test_stream);
     assert!(after_allocation > initial_credits, "Credits should increase after allocation");
 
     // Test credit consumption
-    let consumed = multiplexer.backpressure_manager
-        .consume_credits(test_stream, 100).await?;
+    let consumed = multiplexer.backpressure_manager.consume_credits(test_stream, 100).await?;
     assert!(consumed, "Should be able to consume credits");
 
     let after_consumption = multiplexer.backpressure_manager.get_available_credits(test_stream);
     assert!(after_consumption < after_allocation, "Credits should decrease after consumption");
 
     // Test pressure reporting
-    multiplexer.backpressure_manager
-        .report_pressure(test_stream, BackpressureLevel::Medium).await?;
+    multiplexer
+        .backpressure_manager
+        .report_pressure(test_stream, BackpressureLevel::Medium)
+        .await?;
 
     let stream_state = multiplexer.backpressure_manager.get_stream_pressure(test_stream);
     assert!(stream_state.is_some(), "Stream should have pressure state");
@@ -328,12 +359,13 @@ async fn test_backpressure_management() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(state.get_level(), BackpressureLevel::Medium);
 
     multiplexer.shutdown().await?;
-    
+
     println!("  ✓ Credit allocation and consumption working");
     println!("  ✓ Pressure reporting and monitoring functional");
     Ok(())
 }
 
+#[cfg(feature = "experimental")]
 async fn test_health_monitoring() -> Result<(), Box<dyn std::error::Error>> {
     let config = MultiplexerConfig::default();
     let multiplexer = StreamMultiplexer::new(config)?;
@@ -353,7 +385,7 @@ async fn test_health_monitoring() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a stream and verify metrics update
     let _test_stream = multiplexer.create_stream(StreamConfig::new()).await?;
-    
+
     let updated_metrics = multiplexer.get_metrics();
     assert_eq!(updated_metrics.total_streams_created.load(Ordering::Relaxed), 1);
 
@@ -368,29 +400,29 @@ async fn test_health_monitoring() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // Performance test helpers
+#[cfg(feature = "experimental")]
 #[allow(dead_code)]
 async fn stress_test_concurrent_streams() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔥 Stress Test: Concurrent Stream Operations");
-    
+
     let config = MultiplexerConfig::default();
     let multiplexer = Arc::new(StreamMultiplexer::new(config)?);
     multiplexer.start().await?;
 
     let concurrent_operations = 1000;
     let counter = Arc::new(AtomicUsize::new(0));
-    
+
     let start = Instant::now();
-    
+
     // Spawn concurrent stream creation tasks
     let mut handles = Vec::new();
     for i in 0..concurrent_operations {
         let multiplexer_clone = Arc::clone(&multiplexer);
         let counter_clone = Arc::clone(&counter);
-        
+
         let handle = tokio::spawn(async move {
-            let config = StreamConfig::new()
-                .with_topics(vec![format!("stress.test.{}", i)]);
-                
+            let config = StreamConfig::new().with_topics(vec![format!("stress.test.{}", i)]);
+
             match multiplexer_clone.create_stream(config).await {
                 Ok(_) => counter_clone.fetch_add(1, Ordering::Relaxed),
                 Err(_) => 0,
@@ -398,22 +430,24 @@ async fn stress_test_concurrent_streams() -> Result<(), Box<dyn std::error::Erro
         });
         handles.push(handle);
     }
-    
+
     // Wait for all operations to complete
     for handle in handles {
         handle.await.unwrap();
     }
-    
+
     let elapsed = start.elapsed();
     let successful_operations = counter.load(Ordering::Relaxed);
-    
+
     println!("  Created {} streams concurrently in {:?}", successful_operations, elapsed);
     println!("  Average time per operation: {:?}", elapsed / successful_operations as u32);
-    
+
     multiplexer.shutdown().await?;
-    
-    assert!(successful_operations > concurrent_operations / 2, 
-            "At least half of concurrent operations should succeed");
-    
+
+    assert!(
+        successful_operations > concurrent_operations / 2,
+        "At least half of concurrent operations should succeed"
+    );
+
     Ok(())
 }

@@ -1,590 +1,497 @@
-//! High-Performance Task Scheduler
-//!
-//! Provides NUMA-aware task scheduling with work-stealing capabilities for optimal
-//! load distribution and minimal context switching overhead.
-
-use crate::runtime::{
-    affinity::{NumaTopology, NodeId},
-    executor::{RuntimeConfig, TaskId},
-    worker::WorkerId,
-};
-use futures::future::BoxFuture;
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    task::Waker,
-};
-use crossbeam::{
-    deque::Injector,
-    queue::SegQueue,
-};
+use crate::config::hot_reload::HotReloadConfig;
+use crate::multiplexing::Priority;
+use crate::runtime::affinity::{NodeId, NumaTopology};
+use crate::runtime::worker::WorkerId;
+use crate::telemetry::performance::PerformanceMetric;
+use crossbeam::queue::SegQueue;
 use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use tokio::task::JoinHandle;
+use tracing::{error, info, warn};
 
-/// Task representation for the scheduler
-/// 
-/// Note: We use Arc to make the Task Send + Sync for cross-thread work stealing
-pub struct Task {
-    /// Unique task identifier
+/// Custom Result type for scheduler
+pub type Result<T> = std::result::Result<T, SchedulerError>;
+
+/// Scheduler-specific error types
+#[derive(Debug, thiserror::Error)]
+pub enum SchedulerError {
+    #[error("Scheduler already running")]
+    AlreadyRunning,
+    #[error("Scheduler not running")]
+    NotRunning,
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+    #[error("Task execution error: {0}")]
+    TaskExecution(String),
+    #[error("Resource exhausted: {0}")]
+    ResourceExhausted(String),
+    #[error("Invalid parameter: {0}")]
+    InvalidParameter(String),
+}
+
+/// Task execution error
+#[derive(Debug, thiserror::Error)]
+pub enum TaskExecutionError {
+    #[error("Task timeout")]
+    Timeout,
+    #[error("Task cancelled")]
+    Cancelled,
+    #[error("Task failed: {0}")]
+    Failed(String),
+}
+
+/// Task types for scheduling
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TaskType {
+    /// Message processing task
+    MessageProcess,
+    /// Stream management task
+    StreamManagement,
+    /// Telemetry collection task
+    TelemetryCollection,
+    /// Plugin execution task
+    PluginExecution,
+    /// Periodic maintenance task
+    MaintenanceTask,
+    /// Hot reload task
+    HotReload,
+}
+
+/// Priority-aware task wrapper
+#[derive(Debug)]
+pub struct ScheduledTask {
     pub id: TaskId,
-    
-    /// Future to execute - wrapped in Arc for thread safety
-    pub future: Arc<parking_lot::Mutex<Option<BoxFuture<'static, ()>>>>,
-    
-    /// Task priority (higher = more important)
-    pub priority: TaskPriority,
-    
-    /// Preferred NUMA node for execution
-    pub preferred_node: Option<NodeId>,
-    
-    /// Task creation timestamp for latency tracking
-    pub created_at: std::time::Instant,
-    
-    /// Task waker for notifications
-    pub waker: Option<Waker>,
+    pub task_type: TaskType,
+    pub priority: Priority,
+    pub submitted_at: Instant,
+    pub estimated_duration: Option<Duration>,
+    pub numa_preference: Option<NodeId>,
+    pub handle: JoinHandle<std::result::Result<(), TaskExecutionError>>,
 }
 
-unsafe impl Send for Task {}
-unsafe impl Sync for Task {}
+/// Unique task identifier
+pub type TaskId = u64;
 
-impl Task {
-    /// Create a new task
-    pub fn new(id: TaskId, future: BoxFuture<'static, ()>) -> Self {
-        Self {
-            id,
-            future: Arc::new(parking_lot::Mutex::new(Some(future))),
-            priority: TaskPriority::Normal,
-            preferred_node: None,
-            created_at: std::time::Instant::now(),
-            waker: None,
-        }
-    }
-    
-    /// Create a task with specific priority
-    pub fn with_priority(id: TaskId, future: BoxFuture<'static, ()>, priority: TaskPriority) -> Self {
-        Self {
-            id,
-            future: Arc::new(parking_lot::Mutex::new(Some(future))),
-            priority,
-            preferred_node: None,
-            created_at: std::time::Instant::now(),
-            waker: None,
-        }
-    }
-    
-    /// Create a task with NUMA node preference
-    pub fn with_numa_preference(
-        id: TaskId,
-        future: BoxFuture<'static, ()>,
-        node: NodeId,
-    ) -> Self {
-        Self {
-            id,
-            future: Arc::new(parking_lot::Mutex::new(Some(future))),
-            priority: TaskPriority::Normal,
-            preferred_node: Some(node),
-            created_at: std::time::Instant::now(),
-            waker: None,
-        }
-    }
-    
-    /// Take the future for execution (can only be called once)
-    pub fn take_future(&mut self) -> Option<BoxFuture<'static, ()>> {
-        self.future.lock().take()
-    }
-    
-    /// Get the task age since creation
-    pub fn age(&self) -> std::time::Duration {
-        self.created_at.elapsed()
-    }
-    
-    /// Check if this task should be executed before another
-    pub fn should_execute_before(&self, other: &Task) -> bool {
-        match self.priority.cmp(&other.priority) {
-            std::cmp::Ordering::Greater => true,
-            std::cmp::Ordering::Less => false,
-            std::cmp::Ordering::Equal => {
-                // Same priority: older tasks first (FIFO)
-                self.created_at < other.created_at
-            }
-        }
-    }
+/// Queue statistics for monitoring
+#[derive(Debug, Clone)]
+pub struct QueueStats {
+    pub total_pending: usize,
+    pub high_priority_pending: usize,
+    pub medium_priority_pending: usize,
+    pub low_priority_pending: usize,
+    pub average_wait_time: Duration,
+    pub throughput: u64,
 }
 
-/// Task priority levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum TaskPriority {
-    /// Low priority background tasks
-    Low = 0,
-    
-    /// Normal priority tasks (default)
-    Normal = 1,
-    
-    /// High priority latency-sensitive tasks
-    High = 2,
-    
-    /// Critical real-time tasks
-    Critical = 3,
-}
-
-impl Default for TaskPriority {
-    fn default() -> Self {
-        TaskPriority::Normal
-    }
-}
-
-/// Lock-free task queues with work-stealing support
-/// 
-/// Simplified implementation using SegQueue for thread safety
-#[derive(Clone)]
+/// Task queues organized by priority
+#[derive(Debug)]
 pub struct TaskQueues {
-    /// Global task injector (for new tasks)
-    global_queue: Arc<Injector<Task>>,
-    
-    /// Per-worker local queues using SegQueue
-    local_queues: Vec<Arc<SegQueue<Task>>>,
-    
-    /// High-priority task queue
-    priority_queue: Arc<SegQueue<Task>>,
-    
-    /// Queue statistics
-    stats: Arc<QueueStats>,
+    high_priority: SegQueue<ScheduledTask>,
+    medium_priority: SegQueue<ScheduledTask>,
+    low_priority: SegQueue<ScheduledTask>,
+    stats: Arc<RwLock<QueueStats>>,
 }
 
 impl TaskQueues {
-    /// Create new task queues for the given number of workers
-    pub fn new(worker_count: usize, _queue_depth: usize) -> Self {
-        let mut local_queues = Vec::with_capacity(worker_count);
-        
-        // Create local queues using SegQueue for simplicity
-        for _ in 0..worker_count {
-            local_queues.push(Arc::new(SegQueue::new()));
-        }
-        
-        Self {
-            global_queue: Arc::new(Injector::new()),
-            local_queues,
-            priority_queue: Arc::new(SegQueue::new()),
-            stats: Arc::new(QueueStats::new()),
-        }
-    }
-    
-    /// Get the local queue for a specific worker
-    pub fn local_queue(&self, worker_id: usize) -> Arc<SegQueue<Task>> {
-        self.local_queues[worker_id].clone()
-    }
-    
-    /// Get all local queues for work-stealing
-    pub fn all_local_queues(&self) -> &[Arc<SegQueue<Task>>] {
-        &self.local_queues
-    }
-    
-    /// Push a task to the global queue
-    pub fn push_global(&self, task: Task) {
-        if task.priority >= TaskPriority::High {
-            self.priority_queue.push(task);
-            self.stats.priority_enqueued.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.global_queue.push(task);
-            self.stats.global_enqueued.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    
-    /// Push a task to a specific worker's local queue
-    pub fn push_local(&self, worker_id: usize, task: Task) {
-        if worker_id < self.local_queues.len() {
-            self.local_queues[worker_id].push(task);
-            self.stats.local_enqueued.fetch_add(1, Ordering::Relaxed);
-        } else {
-            // Fallback to global queue
-            self.push_global(task);
-        }
-    }
-    
-    /// Try to pop a high-priority task
-    pub fn try_pop_priority(&self) -> Option<Task> {
-        if let Some(task) = self.priority_queue.pop() {
-            self.stats.priority_dequeued.fetch_add(1, Ordering::Relaxed);
-            Some(task)
-        } else {
-            None
-        }
-    }
-    
-    /// Try to pop a task from the global queue
-    pub fn try_pop_global(&self) -> Option<Task> {
-        if let Some(task) = self.global_queue.steal().success() {
-            self.stats.global_dequeued.fetch_add(1, Ordering::Relaxed);
-            Some(task)
-        } else {
-            None
-        }
-    }
-    
-    /// Try to pop from a specific local queue
-    pub fn try_pop_local(&self, worker_id: usize) -> Option<Task> {
-        if worker_id < self.local_queues.len() {
-            if let Some(task) = self.local_queues[worker_id].pop() {
-                self.stats.local_dequeued.fetch_add(1, Ordering::Relaxed);
-                Some(task)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-    
-    /// Get queue statistics
-    pub fn stats(&self) -> &QueueStats {
-        &self.stats
-    }
-    
-    /// Drain all tasks from all queues (used during shutdown)
-    pub async fn drain_all(&self) {
-        // Drain priority queue
-        while self.priority_queue.pop().is_some() {}
-        
-        // Drain global queue
-        while self.global_queue.steal().success().is_some() {}
-        
-        // Drain local queues
-        for local_queue in &self.local_queues {
-            while local_queue.pop().is_some() {}
-        }
-    }
-}
-
-/// Queue operation statistics
-pub struct QueueStats {
-    pub global_enqueued: AtomicUsize,
-    pub global_dequeued: AtomicUsize,
-    pub local_enqueued: AtomicUsize,
-    pub local_dequeued: AtomicUsize,
-    pub priority_enqueued: AtomicUsize,
-    pub priority_dequeued: AtomicUsize,
-    pub steals_attempted: AtomicUsize,
-    pub steals_successful: AtomicUsize,
-}
-
-impl QueueStats {
     pub fn new() -> Self {
         Self {
-            global_enqueued: AtomicUsize::new(0),
-            global_dequeued: AtomicUsize::new(0),
-            local_enqueued: AtomicUsize::new(0),
-            local_dequeued: AtomicUsize::new(0),
-            priority_enqueued: AtomicUsize::new(0),
-            priority_dequeued: AtomicUsize::new(0),
-            steals_attempted: AtomicUsize::new(0),
-            steals_successful: AtomicUsize::new(0),
+            high_priority: SegQueue::new(),
+            medium_priority: SegQueue::new(),
+            low_priority: SegQueue::new(),
+            stats: Arc::new(RwLock::new(QueueStats {
+                total_pending: 0,
+                high_priority_pending: 0,
+                medium_priority_pending: 0,
+                low_priority_pending: 0,
+                average_wait_time: Duration::from_millis(0),
+                throughput: 0,
+            })),
         }
     }
-    
-    /// Get the number of pending tasks across all queues
-    pub fn pending_tasks(&self) -> usize {
-        let global_pending = self.global_enqueued.load(Ordering::Relaxed)
-            .saturating_sub(self.global_dequeued.load(Ordering::Relaxed));
-        let local_pending = self.local_enqueued.load(Ordering::Relaxed)
-            .saturating_sub(self.local_dequeued.load(Ordering::Relaxed));
-        let priority_pending = self.priority_enqueued.load(Ordering::Relaxed)
-            .saturating_sub(self.priority_dequeued.load(Ordering::Relaxed));
-        
-        global_pending + local_pending + priority_pending
-    }
-    
-    /// Get work-stealing success rate
-    pub fn steal_success_rate(&self) -> f64 {
-        let attempted = self.steals_attempted.load(Ordering::Relaxed);
-        if attempted == 0 {
-            0.0
-        } else {
-            let successful = self.steals_successful.load(Ordering::Relaxed);
-            successful as f64 / attempted as f64
-        }
-    }
-}
 
-/// NUMA-aware task scheduler
-pub struct TaskScheduler {
-    /// Task queues for work distribution
-    queues: TaskQueues,
-    
-    /// NUMA topology information
-    numa_topology: Arc<NumaTopology>,
-    
-    /// Worker to NUMA node mapping
-    worker_numa_mapping: HashMap<WorkerId, NodeId>,
-    
-    /// Load balancing statistics per NUMA node
-    node_load: Arc<RwLock<HashMap<NodeId, NodeLoad>>>,
-    
-    /// Scheduling policy configuration
-    policy: SchedulingPolicy,
-    
-    /// Next worker for round-robin scheduling
-    next_worker: AtomicUsize,
-}
+    pub fn push(&self, task: ScheduledTask) {
+        match task.priority {
+            Priority::High | Priority::Critical => {
+                self.high_priority.push(task);
+                self.stats.write().high_priority_pending += 1;
+            },
+            Priority::Normal => {
+                self.medium_priority.push(task);
+                self.stats.write().medium_priority_pending += 1;
+            },
+            Priority::Low => {
+                self.low_priority.push(task);
+                self.stats.write().low_priority_pending += 1;
+            },
+        }
+        self.stats.write().total_pending += 1;
+    }
 
-/// Load information for a NUMA node
-#[derive(Debug, Clone)]
-struct NodeLoad {
-    /// Number of tasks currently assigned to this node
-    task_count: usize,
-    
-    /// Average task execution time on this node
-    avg_execution_time: std::time::Duration,
-    
-    /// Worker utilization on this node
-    utilization: f64,
-}
+    pub fn pop(&self) -> Option<ScheduledTask> {
+        // Try high priority first
+        if let Some(task) = self.high_priority.pop() {
+            self.stats.write().high_priority_pending =
+                self.stats.read().high_priority_pending.saturating_sub(1);
+            self.stats.write().total_pending = self.stats.read().total_pending.saturating_sub(1);
+            return Some(task);
+        }
 
-impl Default for NodeLoad {
-    fn default() -> Self {
-        Self {
-            task_count: 0,
-            avg_execution_time: std::time::Duration::from_micros(1),
-            utilization: 0.0,
+        // Then medium priority
+        if let Some(task) = self.medium_priority.pop() {
+            self.stats.write().medium_priority_pending =
+                self.stats.read().medium_priority_pending.saturating_sub(1);
+            self.stats.write().total_pending = self.stats.read().total_pending.saturating_sub(1);
+            return Some(task);
         }
-    }
-}
 
-/// Scheduling policy configuration
-#[derive(Debug, Clone)]
-pub struct SchedulingPolicy {
-    /// Enable NUMA-aware scheduling
-    pub numa_aware: bool,
-    
-    /// Enable work stealing between workers
-    pub work_stealing: bool,
-    
-    /// Load balancing threshold (rebalance when difference > threshold)
-    pub load_balance_threshold: f64,
-    
-    /// Maximum steal attempts per worker poll
-    pub max_steal_attempts: usize,
-    
-    /// Prefer local NUMA node for task execution
-    pub prefer_local_numa: bool,
-}
+        // Finally low priority
+        if let Some(task) = self.low_priority.pop() {
+            self.stats.write().low_priority_pending =
+                self.stats.read().low_priority_pending.saturating_sub(1);
+            self.stats.write().total_pending = self.stats.read().total_pending.saturating_sub(1);
+            return Some(task);
+        }
 
-impl Default for SchedulingPolicy {
-    fn default() -> Self {
-        Self {
-            numa_aware: true,
-            work_stealing: true,
-            load_balance_threshold: 0.2, // 20% difference triggers rebalancing
-            max_steal_attempts: 3,
-            prefer_local_numa: true,
-        }
-    }
-}
-
-impl TaskScheduler {
-    /// Create a new task scheduler
-    pub fn new(
-        numa_topology: &NumaTopology,
-        config: &RuntimeConfig,
-        queues: TaskQueues,
-    ) -> Self {
-        let numa_topology = Arc::new(numa_topology.clone());
-        
-        // Build worker to NUMA node mapping
-        let worker_count = queues.local_queues.len();
-        let placements = numa_topology.optimal_worker_placement(worker_count);
-        
-        let mut worker_numa_mapping = HashMap::new();
-        for (worker_idx, cpu_set) in placements.iter().enumerate() {
-            if let Some(numa_node) = cpu_set.numa_node() {
-                worker_numa_mapping.insert(WorkerId::new(worker_idx), numa_node);
-            }
-        }
-        
-        // Initialize node load tracking
-        let mut node_load = HashMap::new();
-        for node in numa_topology.nodes() {
-            node_load.insert(node.id, NodeLoad::default());
-        }
-        
-        let policy = SchedulingPolicy {
-            numa_aware: config.numa_awareness,
-            work_stealing: config.work_stealing,
-            load_balance_threshold: 0.2,
-            max_steal_attempts: 3,
-            prefer_local_numa: true,
-        };
-        
-        Self {
-            queues,
-            numa_topology,
-            worker_numa_mapping,
-            node_load: Arc::new(RwLock::new(node_load)),
-            policy,
-            next_worker: AtomicUsize::new(0),
-        }
-    }
-    
-    /// Schedule a task for execution
-    pub fn schedule_task(&self, future: BoxFuture<'static, ()>, task_id: TaskId) {
-        let task = Task::new(task_id, future);
-        
-        if self.policy.numa_aware {
-            self.schedule_numa_aware(task);
-        } else {
-            self.schedule_round_robin(task);
-        }
-    }
-    
-    /// Schedule a task with specific priority
-    pub fn schedule_task_with_priority(
-        &self,
-        future: BoxFuture<'static, ()>,
-        task_id: TaskId,
-        priority: TaskPriority,
-    ) {
-        let task = Task::with_priority(task_id, future, priority);
-        
-        if task.priority >= TaskPriority::High {
-            // High-priority tasks go to the priority queue
-            self.queues.push_global(task);
-        } else if self.policy.numa_aware {
-            self.schedule_numa_aware(task);
-        } else {
-            self.schedule_round_robin(task);
-        }
-    }
-    
-    /// Schedule a task with NUMA node preference
-    pub fn schedule_task_with_numa_preference(
-        &self,
-        future: BoxFuture<'static, ()>,
-        task_id: TaskId,
-        preferred_node: NodeId,
-    ) {
-        let task = Task::with_numa_preference(task_id, future, preferred_node);
-        self.schedule_numa_aware(task);
-    }
-    
-    /// NUMA-aware task scheduling
-    fn schedule_numa_aware(&self, mut task: Task) {
-        let target_node = if let Some(preferred) = task.preferred_node {
-            preferred
-        } else {
-            // Select least loaded NUMA node
-            self.select_least_loaded_node()
-        };
-        
-        task.preferred_node = Some(target_node);
-        
-        // Find a worker on the target NUMA node
-        if let Some(worker_id) = self.find_worker_on_node(target_node) {
-            self.queues.push_local(worker_id.id(), task);
-            
-            // Update load tracking
-            self.update_node_load(target_node, 1);
-        } else {
-            // Fallback to global queue
-            self.queues.push_global(task);
-        }
-    }
-    
-    /// Round-robin task scheduling
-    fn schedule_round_robin(&self, task: Task) {
-        let worker_count = self.queues.local_queues.len();
-        let worker_id = self.next_worker.fetch_add(1, Ordering::Relaxed) % worker_count;
-        self.queues.push_local(worker_id, task);
-    }
-    
-    /// Select the least loaded NUMA node
-    fn select_least_loaded_node(&self) -> NodeId {
-        let node_load = self.node_load.read();
-        
-        if let Some(numa_nodes) = self.numa_topology.nodes().get(0) {
-            let mut least_loaded_node = numa_nodes.id;
-            let mut min_load = f64::MAX;
-            
-            for node in self.numa_topology.nodes() {
-                if let Some(load) = node_load.get(&node.id) {
-                    let current_load = load.utilization + (load.task_count as f64 * 0.1);
-                    if current_load < min_load {
-                        min_load = current_load;
-                        least_loaded_node = node.id;
-                    }
-                }
-            }
-            
-            least_loaded_node
-        } else {
-            NodeId(0) // Fallback to node 0
-        }
-    }
-    
-    /// Find a worker on a specific NUMA node
-    fn find_worker_on_node(&self, node_id: NodeId) -> Option<WorkerId> {
-        for (&worker_id, &worker_node) in &self.worker_numa_mapping {
-            if worker_node == node_id {
-                return Some(worker_id);
-            }
-        }
         None
     }
-    
-    /// Update load tracking for a NUMA node
-    fn update_node_load(&self, node_id: NodeId, task_delta: i32) {
-        let mut node_load = self.node_load.write();
-        if let Some(load) = node_load.get_mut(&node_id) {
-            if task_delta > 0 {
-                load.task_count = load.task_count.saturating_add(task_delta as usize);
-            } else {
-                load.task_count = load.task_count.saturating_sub((-task_delta) as usize);
+
+    pub fn is_empty(&self) -> bool {
+        self.high_priority.is_empty()
+            && self.medium_priority.is_empty()
+            && self.low_priority.is_empty()
+    }
+
+    pub fn stats(&self) -> QueueStats {
+        self.stats.read().clone()
+    }
+}
+
+/// Advanced scheduler with NUMA awareness and hot reloading
+#[derive(Debug)]
+pub struct AdvancedScheduler {
+    /// Task queues organized by priority
+    queues: Arc<TaskQueues>,
+    /// Worker assignments to NUMA nodes
+    worker_assignments: Arc<RwLock<HashMap<WorkerId, NodeId>>>,
+    /// NUMA topology information
+    numa_topology: Arc<NumaTopology>,
+    /// Scheduler configuration
+    config: Arc<RwLock<SchedulerConfig>>,
+    /// Performance metrics
+    metrics: Arc<PerformanceMetric>,
+    /// Hot reload configuration
+    hot_reload_config: Arc<RwLock<HotReloadConfig>>,
+    /// Task ID generator
+    task_id_counter: AtomicU64,
+    /// Scheduler state
+    is_running: AtomicBool,
+}
+
+/// Scheduler configuration
+#[derive(Debug, Clone)]
+pub struct SchedulerConfig {
+    /// Maximum number of pending tasks per priority level
+    pub max_pending_per_priority: usize,
+    /// Task timeout duration
+    pub task_timeout: Duration,
+    /// Load balancing strategy
+    pub load_balancing_strategy: LoadBalancingStrategy,
+    /// NUMA affinity enabled
+    pub numa_affinity_enabled: bool,
+    /// Work stealing enabled
+    pub work_stealing_enabled: bool,
+    /// Metrics collection interval
+    pub metrics_interval: Duration,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            max_pending_per_priority: 10000,
+            task_timeout: Duration::from_secs(30),
+            load_balancing_strategy: LoadBalancingStrategy::RoundRobin,
+            numa_affinity_enabled: true,
+            work_stealing_enabled: true,
+            metrics_interval: Duration::from_secs(1),
+        }
+    }
+}
+
+/// Load balancing strategies
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoadBalancingStrategy {
+    /// Round-robin assignment
+    RoundRobin,
+    /// Least loaded worker
+    LeastLoaded,
+    /// NUMA-aware assignment
+    NumaAware,
+    /// Weighted round-robin
+    WeightedRoundRobin,
+}
+
+impl AdvancedScheduler {
+    /// Create new advanced scheduler
+    pub fn new(
+        numa_topology: NumaTopology,
+        config: SchedulerConfig,
+        hot_reload_config: HotReloadConfig,
+    ) -> Result<Self> {
+        let scheduler = Self {
+            queues: Arc::new(TaskQueues::new()),
+            worker_assignments: Arc::new(RwLock::new(HashMap::new())),
+            numa_topology: Arc::new(numa_topology),
+            config: Arc::new(RwLock::new(config)),
+            metrics: Arc::new(PerformanceMetric::new("scheduler".to_string())),
+            hot_reload_config: Arc::new(RwLock::new(hot_reload_config)),
+            task_id_counter: AtomicU64::new(0),
+            is_running: AtomicBool::new(false),
+        };
+
+        Ok(scheduler)
+    }
+
+    /// Start the scheduler
+    pub async fn start(&self) -> Result<()> {
+        if self
+            .is_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(SchedulerError::AlreadyRunning);
+        }
+
+        info!("Starting advanced scheduler");
+
+        // Initialize worker assignments based on NUMA topology
+        self.initialize_worker_assignments()?;
+
+        // Start metrics collection
+        self.start_metrics_collection().await?;
+
+        info!("Advanced scheduler started successfully");
+        Ok(())
+    }
+
+    /// Stop the scheduler
+    pub async fn stop(&self) -> Result<()> {
+        if self
+            .is_running
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(SchedulerError::NotRunning);
+        }
+
+        info!("Stopping advanced scheduler");
+
+        // Wait for pending tasks to complete or timeout
+        self.wait_for_pending_tasks().await?;
+
+        info!("Advanced scheduler stopped successfully");
+        Ok(())
+    }
+
+    /// Schedule a task
+    pub async fn schedule_task(
+        &self,
+        task_type: TaskType,
+        priority: Priority,
+        estimated_duration: Option<Duration>,
+        numa_preference: Option<NodeId>,
+        task_fn: impl std::future::Future<Output = std::result::Result<(), TaskExecutionError>>
+        + Send
+        + 'static,
+    ) -> Result<TaskId> {
+        if !self.is_running.load(Ordering::SeqCst) {
+            return Err(SchedulerError::NotRunning);
+        }
+
+        let task_id = self.task_id_counter.fetch_add(1, Ordering::SeqCst);
+
+        let handle = tokio::spawn(task_fn);
+
+        let scheduled_task = ScheduledTask {
+            id: task_id,
+            task_type,
+            priority,
+            submitted_at: Instant::now(),
+            estimated_duration,
+            numa_preference,
+            handle,
+        };
+
+        // Select optimal worker based on strategy
+        let _selected_worker = self.select_worker(&scheduled_task)?;
+
+        // Add to appropriate queue
+        self.queues.push(scheduled_task);
+
+        // Update metrics
+        self.metrics.increment("tasks_scheduled".to_string());
+
+        Ok(task_id)
+    }
+
+    /// Get next task for worker
+    pub fn get_next_task(&self, worker_id: WorkerId) -> Option<ScheduledTask> {
+        // Check worker-specific queue first if NUMA-aware
+        if self.config.read().numa_affinity_enabled {
+            if let Some(task) = self.get_numa_preferred_task(worker_id) {
+                return Some(task);
             }
         }
+
+        // Fall back to general queue
+        self.queues.pop()
     }
-    
-    /// Get task queues
-    pub fn queues(&self) -> &TaskQueues {
-        &self.queues
-    }
-    
-    /// Get scheduling policy
-    pub fn policy(&self) -> &SchedulingPolicy {
-        &self.policy
-    }
-    
-    /// Get current load distribution across NUMA nodes
-    pub fn load_distribution(&self) -> HashMap<NodeId, NodeLoad> {
-        self.node_load.read().clone()
-    }
-    
-    /// Trigger load balancing across NUMA nodes
-    pub fn rebalance_load(&self) {
-        if !self.policy.numa_aware {
-            return;
+
+    /// Initialize worker assignments to NUMA nodes
+    fn initialize_worker_assignments(&self) -> Result<()> {
+        let mut assignments = self.worker_assignments.write();
+        let nodes = self.numa_topology.available_nodes();
+
+        // Simple round-robin assignment for now
+        for worker_idx in 0..8 {
+            let worker_id = WorkerId::new(worker_idx);
+            let node_idx = worker_idx % nodes.len();
+            assignments.insert(worker_id, nodes[node_idx]);
         }
-        
-        let node_load = self.node_load.read();
-        let mut loads: Vec<_> = node_load.iter().collect();
-        loads.sort_by(|a, b| a.1.utilization.partial_cmp(&b.1.utilization).unwrap());
-        
-        if loads.len() < 2 {
-            return;
+
+        info!("Initialized {} worker assignments", assignments.len());
+        Ok(())
+    }
+
+    /// Start metrics collection
+    async fn start_metrics_collection(&self) -> Result<()> {
+        let metrics = Arc::clone(&self.metrics);
+        let queues = Arc::clone(&self.queues);
+        let interval = self.config.read().metrics_interval;
+
+        tokio::spawn(async move {
+            let mut interval_timer = tokio::time::interval(interval);
+
+            loop {
+                interval_timer.tick().await;
+
+                let stats = queues.stats();
+                metrics.set_gauge("queue_depth".to_string(), stats.total_pending as f64);
+                metrics.set_gauge("throughput".to_string(), stats.throughput as f64);
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Wait for pending tasks to complete
+    async fn wait_for_pending_tasks(&self) -> Result<()> {
+        let timeout = self.config.read().task_timeout;
+        let start = Instant::now();
+
+        while !self.queues.is_empty() && start.elapsed() < timeout {
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        
-        let min_load = loads[0].1.utilization;
-        let max_load = loads[loads.len() - 1].1.utilization;
-        
-        if max_load - min_load > self.policy.load_balance_threshold {
-            tracing::debug!(
-                "Load imbalance detected: min={:.2}%, max={:.2}%, triggering rebalancing",
-                min_load * 100.0,
-                max_load * 100.0
-            );
-            
-            // TODO: Implement actual task migration between nodes
-            // This would involve moving tasks from overloaded to underloaded nodes
+
+        if !self.queues.is_empty() {
+            warn!("Timeout waiting for pending tasks to complete");
         }
+
+        Ok(())
+    }
+
+    /// Select optimal worker for task
+    fn select_worker(&self, task: &ScheduledTask) -> Result<Option<WorkerId>> {
+        match self.config.read().load_balancing_strategy {
+            LoadBalancingStrategy::RoundRobin => self.select_round_robin_worker(),
+            LoadBalancingStrategy::LeastLoaded => self.select_least_loaded_worker(),
+            LoadBalancingStrategy::NumaAware => self.select_numa_aware_worker(task),
+            LoadBalancingStrategy::WeightedRoundRobin => self.select_weighted_round_robin_worker(),
+        }
+    }
+
+    fn select_round_robin_worker(&self) -> Result<Option<WorkerId>> {
+        // Simple round-robin implementation
+        Ok(Some(WorkerId::new(0))) // Would implement proper round-robin
+    }
+
+    fn select_least_loaded_worker(&self) -> Result<Option<WorkerId>> {
+        // Would implement load tracking and selection
+        Ok(Some(WorkerId::new(0))) // Would implement proper load balancing
+    }
+
+    fn select_numa_aware_worker(&self, task: &ScheduledTask) -> Result<Option<WorkerId>> {
+        if let Some(preferred_node) = task.numa_preference {
+            return Ok(self.select_numa_worker(preferred_node));
+        }
+
+        // Fall back to round-robin
+        self.select_round_robin_worker()
+    }
+
+    fn select_weighted_round_robin_worker(&self) -> Result<Option<WorkerId>> {
+        // Would implement weighted assignment based on worker capabilities
+        Ok(Some(WorkerId::new(0))) // Would implement proper load balancing
+    }
+
+    fn select_numa_worker(&self, numa_node: NodeId) -> Option<WorkerId> {
+        // Find worker assigned to the specified NUMA node
+        let assignments = self.worker_assignments.read();
+        assignments
+            .iter()
+            .find(|&(_worker_id, node)| *node == numa_node)
+            .map(|(&worker_id, _node)| worker_id)
+    }
+
+    /// Get queue statistics
+    pub fn queue_stats(&self) -> QueueStats {
+        self.queues.stats()
+    }
+
+    /// Get NUMA-preferred task for worker
+    fn get_numa_preferred_task(&self, _worker_id: WorkerId) -> Option<ScheduledTask> {
+        // Look for tasks with matching NUMA preference
+        // This is simplified - would need more sophisticated matching
+        self.queues.pop()
+    }
+
+    /// Update configuration with hot reload
+    pub async fn update_config(&self, new_config: SchedulerConfig) -> Result<()> {
+        let mut config = self.config.write();
+        *config = new_config;
+
+        info!("Scheduler configuration updated via hot reload");
+
+        // Re-initialize worker assignments if NUMA settings changed
+        if config.numa_affinity_enabled {
+            drop(config); // Release lock before calling initialize
+            self.initialize_worker_assignments()?;
+        }
+
+        Ok(())
+    }
+
+    /// Get current configuration
+    pub fn get_config(&self) -> SchedulerConfig {
+        self.config.read().clone()
+    }
+
+    /// Health check
+    pub fn health_check(&self) -> bool {
+        self.is_running.load(Ordering::SeqCst)
+    }
+}
+
+// Add WorkerId implementation
+impl WorkerId {
+    pub fn new(id: usize) -> Self {
+        Self { id }
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
     }
 }
 
@@ -592,110 +499,48 @@ impl TaskScheduler {
 mod tests {
     use super::*;
     use crate::runtime::affinity::NumaTopology;
-    use futures::future::ready;
+
+    #[tokio::test]
+    async fn test_scheduler_creation() {
+        let numa_topology = NumaTopology::detect().unwrap();
+        let config = SchedulerConfig::default();
+        let hot_reload_config = HotReloadConfig::default();
+
+        let scheduler = AdvancedScheduler::new(numa_topology, config, hot_reload_config).unwrap();
+        assert!(!scheduler.health_check());
+    }
+
+    #[tokio::test]
+    async fn test_task_scheduling() {
+        let numa_topology = NumaTopology::detect().unwrap();
+        let config = SchedulerConfig::default();
+        let hot_reload_config = HotReloadConfig::default();
+
+        let scheduler = AdvancedScheduler::new(numa_topology, config, hot_reload_config).unwrap();
+        scheduler.start().await.unwrap();
+
+        let task_id = scheduler
+            .schedule_task(
+                TaskType::MessageProcess,
+                Priority::High,
+                Some(Duration::from_millis(100)),
+                None,
+                async { Ok(()) },
+            )
+            .await
+            .unwrap();
+
+        assert!(task_id > 0);
+
+        scheduler.stop().await.unwrap();
+    }
 
     #[test]
-    fn test_task_creation() {
-        let task_id = TaskId::new();
-        let future = Box::pin(ready(()));
-        let task = Task::new(task_id, future);
-        
-        assert_eq!(task.id, task_id);
-        assert_eq!(task.priority, TaskPriority::Normal);
-        assert!(task.preferred_node.is_none());
-        assert!(task.age().as_nanos() > 0);
-    }
-    
-    #[test]
-    fn test_task_priority_ordering() {
-        let task_id = TaskId::new();
-        let future1 = Box::pin(ready(()));
-        let future2 = Box::pin(ready(()));
-        
-        let high_task = Task::with_priority(task_id, future1, TaskPriority::High);
-        let normal_task = Task::with_priority(task_id, future2, TaskPriority::Normal);
-        
-        assert!(high_task.should_execute_before(&normal_task));
-        assert!(!normal_task.should_execute_before(&high_task));
-    }
-    
-    #[test]
-    fn test_task_queues_creation() {
-        let queues = TaskQueues::new(4, 1024);
-        assert_eq!(queues.local_queues.len(), 4);
-    }
-    
-    #[test]
-    fn test_task_queues_push_pop() {
-        let queues = TaskQueues::new(2, 1024);
-        let task_id = TaskId::new();
-        let future = Box::pin(ready(()));
-        let task = Task::new(task_id, future);
-        
-        // Test global queue
-        queues.push_global(task);
-        assert!(queues.try_pop_global().is_some());
-        assert!(queues.try_pop_global().is_none());
-    }
-    
-    #[test]
-    fn test_priority_queue() {
-        let queues = TaskQueues::new(2, 1024);
-        let task_id = TaskId::new();
-        let future = Box::pin(ready(()));
-        let high_priority_task = Task::with_priority(task_id, future, TaskPriority::High);
-        
-        queues.push_global(high_priority_task);
-        assert!(queues.try_pop_priority().is_some());
-        assert!(queues.try_pop_priority().is_none());
-    }
-    
-    #[test]
-    fn test_queue_stats() {
-        let queues = TaskQueues::new(2, 1024);
+    fn test_task_queues() {
+        let queues = TaskQueues::new();
+        assert!(queues.is_empty());
+
         let stats = queues.stats();
-        
-        assert_eq!(stats.pending_tasks(), 0);
-        assert_eq!(stats.steal_success_rate(), 0.0);
-        
-        // Add some tasks and verify stats
-        let task_id = TaskId::new();
-        let future = Box::pin(ready(()));
-        let task = Task::new(task_id, future);
-        queues.push_global(task);
-        
-        assert!(stats.pending_tasks() > 0);
-    }
-    
-    #[tokio::test]
-    async fn test_task_scheduler_creation() {
-        if let Ok(numa_topology) = NumaTopology::detect() {
-            let config = RuntimeConfig::default();
-            let queues = TaskQueues::new(4, 1024);
-            
-            let scheduler = TaskScheduler::new(&numa_topology, &config, queues);
-            
-            assert!(scheduler.policy.numa_aware);
-            assert!(scheduler.policy.work_stealing);
-            
-            // Test task scheduling
-            let task_id = TaskId::new();
-            let future = Box::pin(ready(()));
-            scheduler.schedule_task(future, task_id);
-            
-            // Verify load distribution
-            let load_dist = scheduler.load_distribution();
-            assert!(!load_dist.is_empty());
-        }
-    }
-    
-    #[test]
-    fn test_scheduling_policy() {
-        let policy = SchedulingPolicy::default();
-        assert!(policy.numa_aware);
-        assert!(policy.work_stealing);
-        assert_eq!(policy.load_balance_threshold, 0.2);
-        assert_eq!(policy.max_steal_attempts, 3);
-        assert!(policy.prefer_local_numa);
+        assert_eq!(stats.total_pending, 0);
     }
 }

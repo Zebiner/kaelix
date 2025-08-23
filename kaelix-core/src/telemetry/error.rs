@@ -1,193 +1,197 @@
-//! # Telemetry Error Handling
+//! Error types and handling for telemetry operations
 //!
-//! Comprehensive error handling for the telemetry & observability framework.
-//! Designed for minimal overhead with zero-allocation error paths where possible.
+//! Provides comprehensive error types for telemetry subsystems including
+//! metrics, logging, tracing, and configuration errors with proper error chaining.
 
 use std::fmt;
 use thiserror::Error;
 
-/// Main telemetry error type with comprehensive error categories
-#[derive(Error, Debug, Clone)]
+/// Primary error type for all telemetry operations
+#[derive(Error, Debug)]
 pub enum TelemetryError {
-    /// Configuration errors
+    // Configuration errors
     #[error("Configuration error: {message}")]
-    Config {
+    Configuration {
         message: String,
-        source: Option<String>,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    /// Metrics collection and recording errors  
+    #[error("Invalid configuration parameter '{parameter}': {message}")]
+    InvalidParameter { parameter: String, message: String },
+
+    #[error("Missing required configuration: {message}")]
+    MissingConfiguration { message: String },
+
+    // Metrics subsystem errors
     #[error("Metrics error: {message}")]
     Metrics {
         message: String,
         metric_key: Option<String>,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    /// Distributed tracing errors
+    #[error("Metric collection failed: {message}")]
+    Collection { message: String },
+
+    #[error("Metric aggregation failed: {message}")]
+    Aggregation { message: String },
+
+    // I/O and network errors
+    #[error("I/O error: {message}")]
+    Io {
+        message: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[error("Export error: {message}")]
+    Export { message: String },
+
+    #[error("Network error: {message}")]
+    Network { message: String },
+
+    // Serialization and data format errors
+    #[error("Serialization error ({format}): {message}")]
+    Serialization { message: String, format: String },
+
+    #[error("Data format error: {message}")]
+    DataFormat { message: String },
+
+    #[error("Protocol error: {message}")]
+    Protocol { message: String },
+
+    // Tracing subsystem errors
     #[error("Tracing error: {message}")]
     Tracing {
         message: String,
         trace_id: Option<String>,
         span_id: Option<String>,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    /// Structured logging errors
-    #[error("Logging error: {message}")]
-    Logging {
-        message: String,
-        log_level: Option<String>,
-    },
+    #[error("Span processing error: {message}")]
+    Span { message: String },
 
-    /// Metrics registry errors
+    #[error("Sampling error: {message}")]
+    Sampling { message: String },
+
+    // Registry and storage errors
     #[error("Registry error: {message}")]
     Registry {
         message: String,
-        registry_size: Option<usize>,
-    },
-
-    /// Metrics export errors
-    #[error("Export error: {message}")]
-    Export {
-        message: String,
-        target: Option<String>,
-        retry_count: Option<u32>,
-    },
-
-    /// I/O and system errors
-    #[error("I/O error: {message}")]
-    Io {
-        message: String,
         #[source]
-        source: std::io::Error,
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    /// Serialization/deserialization errors
-    #[error("Serialization error: {message}")]
-    Serialization {
-        message: String,
-        format: Option<String>,
-    },
+    #[error("Storage error: {message}")]
+    Storage { message: String },
 
-    /// Network and transport errors
-    #[error("Network error: {message}")]
-    Network {
-        message: String,
-        endpoint: Option<String>,
-        status_code: Option<u16>,
-    },
+    #[error("Capacity exceeded: {message}")]
+    Capacity { message: String },
 
-    /// Resource exhaustion errors
-    #[error("Resource exhaustion: {message}")]
-    ResourceExhaustion {
-        message: String,
-        resource_type: ResourceType,
-        current_usage: Option<u64>,
-        limit: Option<u64>,
-    },
-
-    /// Performance threshold violations
-    #[error("Performance violation: {message}")]
-    Performance {
-        message: String,
-        metric_name: String,
-        actual_value: f64,
-        threshold_value: f64,
-    },
-
-    /// Security and validation errors
-    #[error("Security error: {message}")]
-    Security {
-        message: String,
-        security_context: Option<String>,
-    },
-
-    /// Thread and concurrency errors
+    // Concurrency and synchronization errors
     #[error("Concurrency error: {message}")]
-    Concurrency {
-        message: String,
-        thread_name: Option<String>,
-    },
+    Concurrency { message: String },
+
+    #[error("Lock error: {message}")]
+    Lock { message: String },
+
+    #[error("Channel error: {message}")]
+    Channel { message: String },
+
+    // Resource and system errors
+    #[error("Resource unavailable: {message}")]
+    Resource { message: String },
+
+    #[error("System error: {message}")]
+    System { message: String },
+
+    #[error("Timeout error: {message}")]
+    Timeout { message: String },
+
+    // Generic internal error
+    #[error("Internal error: {message}")]
+    Internal { message: String },
 }
 
-/// Types of system resources that can be exhausted
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResourceType {
-    /// Memory allocation limits
-    Memory,
-    /// CPU usage limits  
-    Cpu,
-    /// Network bandwidth limits
-    NetworkBandwidth,
-    /// Disk space limits
-    DiskSpace,
-    /// File descriptor limits
-    FileDescriptors,
-    /// Thread pool limits
-    ThreadPool,
-    /// Queue capacity limits
-    QueueCapacity,
-    /// Connection pool limits
-    ConnectionPool,
-}
-
-impl fmt::Display for ResourceType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Memory => write!(f, "memory"),
-            Self::Cpu => write!(f, "cpu"),
-            Self::NetworkBandwidth => write!(f, "network_bandwidth"),
-            Self::DiskSpace => write!(f, "disk_space"),
-            Self::FileDescriptors => write!(f, "file_descriptors"),
-            Self::ThreadPool => write!(f, "thread_pool"),
-            Self::QueueCapacity => write!(f, "queue_capacity"),
-            Self::ConnectionPool => write!(f, "connection_pool"),
-        }
-    }
-}
+/// Result type alias for telemetry operations
+pub type Result<T> = std::result::Result<T, TelemetryError>;
 
 impl TelemetryError {
-    /// Creates a new configuration error
+    // Configuration error constructors
     pub fn config<S: Into<String>>(message: S) -> Self {
-        Self::Config {
-            message: message.into(),
-            source: None,
-        }
+        Self::Configuration { message: message.into(), source: None }
     }
 
-    /// Creates a configuration error with source information
-    pub fn config_with_source<S: Into<String>>(message: S, source: S) -> Self {
-        Self::Config {
-            message: message.into(),
-            source: Some(source.into()),
-        }
+    pub fn config_with_source<S: Into<String>>(
+        message: S,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    ) -> Self {
+        Self::Configuration { message: message.into(), source: Some(source) }
     }
 
-    /// Creates a new metrics error
+    // Metrics error constructors
     pub fn metrics<S: Into<String>>(message: S) -> Self {
-        Self::Metrics {
-            message: message.into(),
-            metric_key: None,
-        }
+        Self::Metrics { message: message.into(), metric_key: None, source: None }
     }
 
-    /// Creates a metrics error with metric key context
     pub fn metrics_with_key<S: Into<String>>(message: S, metric_key: S) -> Self {
-        Self::Metrics {
-            message: message.into(),
-            metric_key: Some(metric_key.into()),
-        }
+        Self::Metrics { message: message.into(), metric_key: Some(metric_key.into()), source: None }
     }
 
-    /// Creates a new tracing error
+    pub fn metrics_with_source<S: Into<String>>(
+        message: S,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    ) -> Self {
+        Self::Metrics { message: message.into(), metric_key: None, source: Some(source) }
+    }
+
+    pub fn collection<S: Into<String>>(message: S) -> Self {
+        Self::Collection { message: message.into() }
+    }
+
+    pub fn aggregation<S: Into<String>>(message: S) -> Self {
+        Self::Aggregation { message: message.into() }
+    }
+
+    // I/O error constructors
+    pub fn io<S: Into<String>>(message: S, source: std::io::Error) -> Self {
+        Self::Io { message: message.into(), source: Box::new(source) }
+    }
+
+    pub fn export<S: Into<String>>(message: S) -> Self {
+        Self::Export { message: message.into() }
+    }
+
+    pub fn network<S: Into<String>>(message: S) -> Self {
+        Self::Network { message: message.into() }
+    }
+
+    // Serialization error constructors
+    pub fn serialization<S: Into<String>>(message: S) -> Self {
+        Self::Serialization { message: message.into(), format: "unknown".to_string() }
+    }
+
+    pub fn serialization_with_format<S: Into<String>>(message: S, format: S) -> Self {
+        Self::Serialization { message: message.into(), format: format.into() }
+    }
+
+    pub fn data_format<S: Into<String>>(message: S) -> Self {
+        Self::DataFormat { message: message.into() }
+    }
+
+    pub fn protocol<S: Into<String>>(message: S) -> Self {
+        Self::Protocol { message: message.into() }
+    }
+
+    // Tracing error constructors
     pub fn tracing<S: Into<String>>(message: S) -> Self {
-        Self::Tracing {
-            message: message.into(),
-            trace_id: None,
-            span_id: None,
-        }
+        Self::Tracing { message: message.into(), trace_id: None, span_id: None, source: None }
     }
 
-    /// Creates a tracing error with trace context
     pub fn tracing_with_context<S: Into<String>>(
         message: S,
         trace_id: Option<S>,
@@ -195,262 +199,145 @@ impl TelemetryError {
     ) -> Self {
         Self::Tracing {
             message: message.into(),
-            trace_id: trace_id.map(Into::into),
-            span_id: span_id.map(Into::into),
+            trace_id: trace_id.map(|s| s.into()),
+            span_id: span_id.map(|s| s.into()),
+            source: None,
         }
     }
 
-    /// Creates a new logging error
-    pub fn logging<S: Into<String>>(message: S) -> Self {
-        Self::Logging {
-            message: message.into(),
-            log_level: None,
-        }
+    pub fn span<S: Into<String>>(message: S) -> Self {
+        Self::Span { message: message.into() }
     }
 
-    /// Creates a logging error with log level context
-    pub fn logging_with_level<S: Into<String>>(message: S, log_level: S) -> Self {
-        Self::Logging {
-            message: message.into(),
-            log_level: Some(log_level.into()),
-        }
+    pub fn sampling<S: Into<String>>(message: S) -> Self {
+        Self::Sampling { message: message.into() }
     }
 
-    /// Creates a new registry error
+    // Registry error constructors
     pub fn registry<S: Into<String>>(message: S) -> Self {
-        Self::Registry {
-            message: message.into(),
-            registry_size: None,
-        }
+        Self::Registry { message: message.into(), source: None }
     }
 
-    /// Creates a registry error with size context
-    pub fn registry_with_size<S: Into<String>>(message: S, size: usize) -> Self {
-        Self::Registry {
-            message: message.into(),
-            registry_size: Some(size),
-        }
-    }
-
-    /// Creates a new export error
-    pub fn export<S: Into<String>>(message: S) -> Self {
-        Self::Export {
-            message: message.into(),
-            target: None,
-            retry_count: None,
-        }
-    }
-
-    /// Creates an export error with target and retry context
-    pub fn export_with_context<S: Into<String>>(
+    pub fn registry_with_source<S: Into<String>>(
         message: S,
-        target: Option<S>,
-        retry_count: Option<u32>,
+        source: Box<dyn std::error::Error + Send + Sync>,
     ) -> Self {
-        Self::Export {
-            message: message.into(),
-            target: target.map(Into::into),
-            retry_count,
-        }
+        Self::Registry { message: message.into(), source: Some(source) }
     }
 
-    /// Creates a new I/O error
-    pub fn io<S: Into<String>>(message: S, source: std::io::Error) -> Self {
-        Self::Io {
-            message: message.into(),
-            source,
-        }
+    pub fn storage<S: Into<String>>(message: S) -> Self {
+        Self::Storage { message: message.into() }
     }
 
-    /// Creates a new serialization error
-    pub fn serialization<S: Into<String>>(message: S) -> Self {
-        Self::Serialization {
-            message: message.into(),
-            format: None,
-        }
+    pub fn capacity<S: Into<String>>(message: S) -> Self {
+        Self::Capacity { message: message.into() }
     }
 
-    /// Creates a serialization error with format context
-    pub fn serialization_with_format<S: Into<String>>(message: S, format: S) -> Self {
-        Self::Serialization {
-            message: message.into(),
-            format: Some(format.into()),
-        }
-    }
-
-    /// Creates a new network error
-    pub fn network<S: Into<String>>(message: S) -> Self {
-        Self::Network {
-            message: message.into(),
-            endpoint: None,
-            status_code: None,
-        }
-    }
-
-    /// Creates a network error with endpoint and status context
-    pub fn network_with_context<S: Into<String>>(
-        message: S,
-        endpoint: Option<S>,
-        status_code: Option<u16>,
-    ) -> Self {
-        Self::Network {
-            message: message.into(),
-            endpoint: endpoint.map(Into::into),
-            status_code,
-        }
-    }
-
-    /// Creates a new resource exhaustion error
-    pub fn resource_exhaustion<S: Into<String>>(
-        message: S,
-        resource_type: ResourceType,
-    ) -> Self {
-        Self::ResourceExhaustion {
-            message: message.into(),
-            resource_type,
-            current_usage: None,
-            limit: None,
-        }
-    }
-
-    /// Creates a resource exhaustion error with usage context
-    pub fn resource_exhaustion_with_usage<S: Into<String>>(
-        message: S,
-        resource_type: ResourceType,
-        current_usage: u64,
-        limit: u64,
-    ) -> Self {
-        Self::ResourceExhaustion {
-            message: message.into(),
-            resource_type,
-            current_usage: Some(current_usage),
-            limit: Some(limit),
-        }
-    }
-
-    /// Creates a new performance violation error
-    pub fn performance_violation<S: Into<String>>(
-        message: S,
-        metric_name: S,
-        actual_value: f64,
-        threshold_value: f64,
-    ) -> Self {
-        Self::Performance {
-            message: message.into(),
-            metric_name: metric_name.into(),
-            actual_value,
-            threshold_value,
-        }
-    }
-
-    /// Creates a new security error
-    pub fn security<S: Into<String>>(message: S) -> Self {
-        Self::Security {
-            message: message.into(),
-            security_context: None,
-        }
-    }
-
-    /// Creates a security error with security context
-    pub fn security_with_context<S: Into<String>>(message: S, context: S) -> Self {
-        Self::Security {
-            message: message.into(),
-            security_context: Some(context.into()),
-        }
-    }
-
-    /// Creates a new concurrency error
+    // Concurrency error constructors
     pub fn concurrency<S: Into<String>>(message: S) -> Self {
-        Self::Concurrency {
-            message: message.into(),
-            thread_name: None,
-        }
+        Self::Concurrency { message: message.into() }
     }
 
-    /// Creates a concurrency error with thread context
-    pub fn concurrency_with_thread<S: Into<String>>(message: S, thread_name: S) -> Self {
-        Self::Concurrency {
-            message: message.into(),
-            thread_name: Some(thread_name.into()),
-        }
+    pub fn lock<S: Into<String>>(message: S) -> Self {
+        Self::Lock { message: message.into() }
     }
 
-    /// Returns true if this is a retryable error
-    pub fn is_retryable(&self) -> bool {
+    pub fn channel<S: Into<String>>(message: S) -> Self {
+        Self::Channel { message: message.into() }
+    }
+
+    // Resource error constructors
+    pub fn resource<S: Into<String>>(message: S) -> Self {
+        Self::Resource { message: message.into() }
+    }
+
+    pub fn system<S: Into<String>>(message: S) -> Self {
+        Self::System { message: message.into() }
+    }
+
+    pub fn timeout<S: Into<String>>(message: S) -> Self {
+        Self::Timeout { message: message.into() }
+    }
+
+    // Generic error constructor
+    pub fn internal<S: Into<String>>(message: S) -> Self {
+        Self::Internal { message: message.into() }
+    }
+
+    // Utility methods
+    pub fn is_retriable(&self) -> bool {
+        matches!(
+            self,
+            Self::Network { .. }
+                | Self::Timeout { .. }
+                | Self::Resource { .. }
+                | Self::Concurrency { .. }
+                | Self::Lock { .. }
+                | Self::Channel { .. }
+        )
+    }
+
+    pub fn error_code(&self) -> &'static str {
         match self {
-            Self::Network { .. } => true,
-            Self::Export { .. } => true,
-            Self::Io { .. } => true,
-            Self::ResourceExhaustion { resource_type, .. } => {
-                matches!(resource_type, ResourceType::NetworkBandwidth | ResourceType::QueueCapacity)
-            }
-            _ => false,
+            Self::Configuration { .. } => "CONFIG_ERROR",
+            Self::InvalidParameter { .. } => "INVALID_PARAM",
+            Self::MissingConfiguration { .. } => "MISSING_CONFIG",
+            Self::Metrics { .. } => "METRICS_ERROR",
+            Self::Collection { .. } => "COLLECTION_ERROR",
+            Self::Aggregation { .. } => "AGGREGATION_ERROR",
+            Self::Io { .. } => "IO_ERROR",
+            Self::Export { .. } => "EXPORT_ERROR",
+            Self::Network { .. } => "NETWORK_ERROR",
+            Self::Serialization { .. } => "SERIALIZATION_ERROR",
+            Self::DataFormat { .. } => "DATA_FORMAT_ERROR",
+            Self::Protocol { .. } => "PROTOCOL_ERROR",
+            Self::Tracing { .. } => "TRACING_ERROR",
+            Self::Span { .. } => "SPAN_ERROR",
+            Self::Sampling { .. } => "SAMPLING_ERROR",
+            Self::Registry { .. } => "REGISTRY_ERROR",
+            Self::Storage { .. } => "STORAGE_ERROR",
+            Self::Capacity { .. } => "CAPACITY_ERROR",
+            Self::Concurrency { .. } => "CONCURRENCY_ERROR",
+            Self::Lock { .. } => "LOCK_ERROR",
+            Self::Channel { .. } => "CHANNEL_ERROR",
+            Self::Resource { .. } => "RESOURCE_ERROR",
+            Self::System { .. } => "SYSTEM_ERROR",
+            Self::Timeout { .. } => "TIMEOUT_ERROR",
+            Self::Internal { .. } => "INTERNAL_ERROR",
         }
     }
 
-    /// Returns true if this is a critical error that should stop the system
-    pub fn is_critical(&self) -> bool {
+    pub fn severity(&self) -> ErrorSeverity {
         match self {
-            Self::Security { .. } => true,
-            Self::ResourceExhaustion { resource_type, .. } => {
-                matches!(resource_type, ResourceType::Memory | ResourceType::FileDescriptors)
-            }
-            Self::Performance { actual_value, threshold_value, .. } => {
-                // Critical if performance is extremely degraded (>10x threshold)
-                *actual_value > *threshold_value * 10.0
-            }
-            _ => false,
-        }
-    }
-
-    /// Returns the error category for metrics collection
-    pub fn category(&self) -> &'static str {
-        match self {
-            Self::Config { .. } => "config",
-            Self::Metrics { .. } => "metrics",
-            Self::Tracing { .. } => "tracing",
-            Self::Logging { .. } => "logging",
-            Self::Registry { .. } => "registry",
-            Self::Export { .. } => "export",
-            Self::Io { .. } => "io",
-            Self::Serialization { .. } => "serialization",
-            Self::Network { .. } => "network",
-            Self::ResourceExhaustion { .. } => "resource_exhaustion",
-            Self::Performance { .. } => "performance",
-            Self::Security { .. } => "security",
-            Self::Concurrency { .. } => "concurrency",
+            Self::Configuration { .. }
+            | Self::InvalidParameter { .. }
+            | Self::MissingConfiguration { .. } => ErrorSeverity::High,
+            Self::System { .. } | Self::Internal { .. } => ErrorSeverity::Critical,
+            Self::Network { .. } | Self::Timeout { .. } | Self::Resource { .. } => {
+                ErrorSeverity::Medium
+            },
+            _ => ErrorSeverity::Low,
         }
     }
 }
 
-/// Result type alias for telemetry operations
-pub type Result<T> = std::result::Result<T, TelemetryError>;
-
-/// Error context for enhanced error reporting with minimal allocation
-#[derive(Debug, Clone)]
-pub struct ErrorContext {
-    /// Component that generated the error
-    pub component: &'static str,
-    /// Operation that failed
-    pub operation: &'static str,
-    /// Additional context key-value pairs
-    pub context: smallvec::SmallVec<[(&'static str, String); 4]>,
+/// Error severity levels
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ErrorSeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
 }
 
-impl ErrorContext {
-    /// Creates a new error context
-    pub fn new(component: &'static str, operation: &'static str) -> Self {
-        Self {
-            component,
-            operation,
-            context: smallvec::SmallVec::new(),
+impl fmt::Display for ErrorSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Low => write!(f, "LOW"),
+            Self::Medium => write!(f, "MEDIUM"),
+            Self::High => write!(f, "HIGH"),
+            Self::Critical => write!(f, "CRITICAL"),
         }
-    }
-
-    /// Adds context information
-    pub fn with_context<S: Into<String>>(mut self, key: &'static str, value: S) -> Self {
-        self.context.push((key, value.into()));
-        self
     }
 }
 
@@ -464,7 +351,7 @@ impl From<std::io::Error> for TelemetryError {
 /// Conversion from serde JSON errors
 impl From<serde_json::Error> for TelemetryError {
     fn from(err: serde_json::Error) -> Self {
-        Self::serialization_with_format(err.to_string(), "json")
+        Self::serialization_with_format(err.to_string(), "json".to_string())
     }
 }
 
@@ -475,98 +362,64 @@ impl From<tokio::task::JoinError> for TelemetryError {
     }
 }
 
+/// Type alias for compatibility with existing code
+pub type MemoryStreamerError = TelemetryError;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_error_creation() {
-        let err = TelemetryError::config("Invalid configuration");
-        assert_eq!(err.category(), "config");
-        assert!(!err.is_retryable());
-        assert!(!err.is_critical());
+        let err = TelemetryError::config("Test configuration error");
+        assert_eq!(err.error_code(), "CONFIG_ERROR");
+        assert_eq!(err.severity(), ErrorSeverity::High);
     }
 
     #[test]
-    fn test_error_with_context() {
-        let err = TelemetryError::metrics_with_key("Failed to record metric", "test.counter");
+    fn test_error_with_source() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "File not found");
+        let err = TelemetryError::from(io_err);
+        assert_eq!(err.error_code(), "IO_ERROR");
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn test_retriable_errors() {
+        assert!(TelemetryError::network("Network error").is_retriable());
+        assert!(TelemetryError::timeout("Timeout error").is_retriable());
+        assert!(!TelemetryError::config("Config error").is_retriable());
+    }
+
+    #[test]
+    fn test_error_severity() {
+        assert_eq!(TelemetryError::config("").severity(), ErrorSeverity::High);
+        assert_eq!(TelemetryError::network("").severity(), ErrorSeverity::Medium);
+        assert_eq!(TelemetryError::metrics("").severity(), ErrorSeverity::Low);
+        assert_eq!(TelemetryError::internal("").severity(), ErrorSeverity::Critical);
+    }
+
+    #[test]
+    fn test_metrics_error_with_key() {
+        let err = TelemetryError::metrics_with_key("Test error", "test.metric");
         match err {
             TelemetryError::Metrics { metric_key: Some(key), .. } => {
-                assert_eq!(key, "test.counter");
-            }
-            _ => panic!("Expected metrics error with key"),
+                assert_eq!(key, "test.metric");
+            },
+            _ => panic!("Expected Metrics error with key"),
         }
     }
 
     #[test]
-    fn test_retryable_errors() {
-        let network_err = TelemetryError::network("Connection failed");
-        assert!(network_err.is_retryable());
-
-        let config_err = TelemetryError::config("Invalid setting");
-        assert!(!config_err.is_retryable());
-    }
-
-    #[test]
-    fn test_critical_errors() {
-        let security_err = TelemetryError::security("Authentication failed");
-        assert!(security_err.is_critical());
-
-        let memory_err = TelemetryError::resource_exhaustion_with_usage(
-            "Out of memory",
-            ResourceType::Memory,
-            1_000_000_000,
-            1_000_000_000,
-        );
-        assert!(memory_err.is_critical());
-    }
-
-    #[test]
-    fn test_performance_error_criticality() {
-        let critical_perf = TelemetryError::performance_violation(
-            "Severe performance degradation",
-            "latency",
-            1000.0,
-            10.0, // 100x threshold = critical
-        );
-        assert!(critical_perf.is_critical());
-
-        let minor_perf = TelemetryError::performance_violation(
-            "Minor performance degradation",
-            "latency",
-            50.0,
-            10.0, // 5x threshold = not critical
-        );
-        assert!(!minor_perf.is_critical());
-    }
-
-    #[test]
-    fn test_error_context() {
-        let ctx = ErrorContext::new("metrics", "record")
-            .with_context("metric_key", "test.counter")
-            .with_context("value", "42");
-
-        assert_eq!(ctx.component, "metrics");
-        assert_eq!(ctx.operation, "record");
-        assert_eq!(ctx.context.len(), 2);
-        assert_eq!(ctx.context[0].0, "metric_key");
-        assert_eq!(ctx.context[0].1, "test.counter");
-    }
-
-    #[test]
-    fn test_resource_type_display() {
-        assert_eq!(ResourceType::Memory.to_string(), "memory");
-        assert_eq!(ResourceType::NetworkBandwidth.to_string(), "network_bandwidth");
-        assert_eq!(ResourceType::QueueCapacity.to_string(), "queue_capacity");
-    }
-
-    #[test]
-    fn test_error_conversions() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let tel_err: TelemetryError = io_err.into();
-        match tel_err {
-            TelemetryError::Io { .. } => (),
-            _ => panic!("Expected I/O error conversion"),
+    fn test_tracing_error_with_context() {
+        let err =
+            TelemetryError::tracing_with_context("Test error", Some("trace-123"), Some("span-456"));
+        match err {
+            TelemetryError::Tracing { trace_id: Some(tid), span_id: Some(sid), .. } => {
+                assert_eq!(tid, "trace-123");
+                assert_eq!(sid, "span-456");
+            },
+            _ => panic!("Expected Tracing error with context"),
         }
     }
 }

@@ -1,374 +1,362 @@
-//! Configuration validation and constraint checking
+//! # Configuration Validation
 //!
-//! This module provides comprehensive validation for MemoryStreamer configuration
-//! with both structural validation (via validator crate) and semantic validation
-//! for performance, security, and operational constraints.
-//!
-//! Validation ensures that:
-//! - All configuration values are within acceptable ranges
-//! - Performance targets are realistic and achievable
-//! - Security settings are properly configured
-//! - Network settings are valid and safe
-//! - Resource constraints are respected
+//! Validates configuration settings for consistency, safety, and correctness.
 
-use crate::config::schema::*;
-use crate::error::{Result};
-use std::net::IpAddr;
-use std::path::Path;
+use crate::{
+    Error, Result,
+    config::schema::{MemoryStreamerConfig, ValidationContext},
+};
+use std::net::SocketAddr;
 use tracing::{debug, warn};
-use validator::Validate;
+use validator::{Validate, ValidationError, ValidationErrors};
 
-/// Comprehensive configuration validator
-///
-/// Provides both structural validation (data types, ranges) and semantic validation
-/// (performance constraints, security requirements, operational safety).
+/// Configuration validator with comprehensive validation rules
 pub struct ConfigValidator {
-    /// Validation context for environment-specific checks
+    /// Validation context with system information
     context: ValidationContext,
 }
 
-/// Validation context for environment-specific configuration checking
-#[derive(Debug, Clone)]
-pub struct ValidationContext {
-    /// Available CPU cores for thread validation
-    pub cpu_cores: usize,
-    /// Available memory for memory configuration validation
-    pub available_memory: u64,
-    /// Network interfaces available for binding
-    pub network_interfaces: Vec<IpAddr>,
-    /// Whether running in production environment
-    pub is_production: bool,
-}
-
 impl ConfigValidator {
-    /// Create a new configuration validator with system context
+    /// Create a new configuration validator
     pub fn new() -> Self {
-        Self {
-            context: ValidationContext::detect_system(),
-        }
+        Self { context: ValidationContext::detect() }
     }
 
-    /// Create a validator with custom validation context
+    /// Create validator with custom context
     pub fn with_context(context: ValidationContext) -> Self {
         Self { context }
     }
 
-    /// Validate complete MemoryStreamer configuration
-    ///
-    /// Performs comprehensive validation including:
-    /// - Structural validation using validator crate
-    /// - Performance constraint validation
-    /// - Security configuration validation
-    /// - Network and protocol compatibility checks
-    /// - Resource usage validation
-    ///
-    /// # Arguments
-    /// * `config` - The configuration to validate
-    ///
-    /// # Returns
-    /// * `Ok(())` - Configuration is valid
-    /// * `Err(Error)` - Configuration has validation errors
-    pub fn validate(&self, config: &MemoryStreamerConfig) -> Result<()> {
-        debug!("Starting comprehensive configuration validation");
+    /// Validate a configuration
+    pub fn validate(config: &MemoryStreamerConfig) -> Result<()> {
+        let validator = Self::new();
+        validator.validate_config(config)
+    }
 
-        // 1. Structural validation using validator crate
-        config.validate().map_err(|e| crate::error::Error::Configuration {
-            message: format!("Structural validation failed: {}", e)
-        })?;
+    /// Perform comprehensive validation of the configuration
+    pub fn validate_config(&self, config: &MemoryStreamerConfig) -> Result<()> {
+        debug!("Starting configuration validation");
 
-        // 2. Performance constraint validation
-        self.validate_performance_constraints(&config.performance)?;
+        // Basic field validation using validator crate
+        config.validate().map_err(Error::from)?;
 
-        // 3. Network configuration validation
-        self.validate_network_configuration(&config.network)?;
-
-        // 4. Protocol configuration validation
-        self.validate_protocol_configuration(&config.protocol)?;
-
-        // 5. Security configuration validation
-        self.validate_security_configuration(&config.security)?;
-
-        // 6. Cross-component validation
-        self.validate_cross_component_constraints(config)?;
-
-        // 7. Environment-specific validation
-        self.validate_environment_constraints(config)?;
+        // Custom business logic validation
+        self.validate_network_config(config)?;
+        self.validate_performance_config(config)?;
+        self.validate_security_config(config)?;
+        self.validate_telemetry_config(config)?;
+        self.validate_storage_config(config)?;
+        self.validate_integration_constraints(config)?;
 
         debug!("Configuration validation completed successfully");
         Ok(())
     }
 
-    /// Validate performance-related configuration constraints
-    fn validate_performance_constraints(&self, config: &PerformanceConfig) -> Result<()> {
-        debug!("Validating performance constraints");
+    /// Validate network configuration
+    fn validate_network_config(&self, config: &MemoryStreamerConfig) -> Result<()> {
+        // Validate host/port combinations
+        let bind_addr = format!("{}:{}", config.network.host, config.network.port);
+        bind_addr
+            .parse::<SocketAddr>()
+            .map_err(|e| Error::Configuration(format!("Invalid bind address {bind_addr}: {e}")))?;
 
-        // Validate worker thread configuration
-        let worker_threads = config.worker_threads.unwrap_or(self.context.cpu_cores);
-        
-        if worker_threads > self.context.cpu_cores * 2 {
+        // Check port ranges
+        if config.network.port < 1024 && config.network.host != "localhost" {
+            warn!("Using privileged port {} may require special permissions", config.network.port);
+        }
+
+        // Note: No need to check port > 65535 since u16 max is 65535
+
+        // Validate connection limits
+        if config.network.max_connections == 0 {
+            return Err(Error::Configuration(
+                "Maximum connections must be greater than 0".to_string(),
+            ));
+        }
+
+        if config.network.max_connections > 1_000_000 {
+            warn!("Very high connection limit may cause resource exhaustion");
+        }
+
+        // Validate timeout values
+        if config.network.read_timeout_ms == 0 || config.network.write_timeout_ms == 0 {
+            return Err(Error::Configuration(
+                "Network timeouts must be greater than 0".to_string(),
+            ));
+        }
+
+        if config.network.read_timeout_ms > 300_000 || config.network.write_timeout_ms > 300_000 {
+            warn!("Network timeouts over 5 minutes may cause poor user experience");
+        }
+
+        Ok(())
+    }
+
+    /// Validate performance configuration
+    fn validate_performance_config(&self, config: &MemoryStreamerConfig) -> Result<()> {
+        // Validate worker thread count (performance config is under telemetry)
+        let worker_threads =
+            config.telemetry.performance.worker_threads.unwrap_or(self.context.cpu_cores);
+
+        if worker_threads == 0 {
+            return Err(Error::Configuration("Worker threads must be greater than 0".to_string()));
+        }
+
+        if worker_threads > self.context.cpu_cores * 4 {
             warn!(
-                "Worker threads ({}) exceed 2x CPU cores ({}), may cause oversubscription",
-                worker_threads, self.context.cpu_cores
+                "Worker threads ({worker_threads}) significantly exceed CPU cores ({}), may cause contention",
+                self.context.cpu_cores
             );
         }
 
-        // Validate latency target is achievable
-        if config.target_latency_p99_us < 5 && self.context.is_production {
-            warn!("Sub-5μs latency targets may be difficult to achieve in production");
-        }
-
-        // Validate throughput and latency relationship
-        let latency_throughput_product = config.target_latency_p99_us * config.max_throughput;
-        if latency_throughput_product > 1_000_000_000 {
-            warn!("High latency-throughput product may indicate unrealistic performance targets");
-        }
-
-        Ok(())
-    }
-
-    /// Validate network configuration
-    fn validate_network_configuration(&self, config: &NetworkConfig) -> Result<()> {
-        debug!("Validating network configuration");
-
-        // Parse and validate bind address
-        let bind_addr: IpAddr = config.bind_address.parse()
-            .map_err(|_| crate::error::Error::Configuration {
-                message: format!("Invalid bind address: {}", config.bind_address)
-            })?;
-
-        // Check if address is available on system
-        if !self.context.network_interfaces.is_empty() 
-            && !self.context.network_interfaces.contains(&bind_addr) 
-            && !bind_addr.is_unspecified() {
-            warn!("Bind address {} may not be available on this system", bind_addr);
-        }
-
-        // Validate connection limits are reasonable
-        if config.max_connections > 1_000_000 && self.context.is_production {
-            warn!("Very high connection limit may exhaust system resources");
-        }
-
         // Validate buffer sizes
-        self.validate_network_buffers(&config.buffers)?;
-
-        Ok(())
-    }
-
-    /// Validate network buffer configuration
-    fn validate_network_buffers(&self, config: &NetworkBufferConfig) -> Result<()> {
-        // Calculate total buffer memory usage
-        let per_connection_memory = config.send_buffer_size + config.recv_buffer_size;
-        let total_buffer_memory = per_connection_memory as u64 * 1000; // Estimate for 1000 connections
-
-        if total_buffer_memory > self.context.available_memory / 4 {
-            warn!("Network buffers may consume excessive memory");
+        if config.telemetry.performance.buffer_size == 0 {
+            return Err(Error::Configuration("Buffer size must be greater than 0".to_string()));
         }
 
-        Ok(())
-    }
-
-    /// Validate protocol configuration
-    fn validate_protocol_configuration(&self, config: &ProtocolConfig) -> Result<()> {
-        debug!("Validating protocol configuration");
-
-        // Validate payload size is reasonable
-        if config.max_payload_size > 50 * 1024 * 1024 { // 50MB
-            warn!("Large payload sizes may impact latency");
+        // Check for power-of-2 buffer sizes for optimal performance
+        if !config.telemetry.performance.buffer_size.is_power_of_two() {
+            debug!("Buffer size is not power of 2, may impact performance");
         }
 
-        // Validate compression configuration
-        if config.enable_compression {
-            self.validate_compression_config(&config.compression)?;
+        // Validate batch sizes
+        if config.telemetry.performance.batch_size > config.telemetry.performance.buffer_size as u32
+        {
+            return Err(Error::Configuration("Batch size cannot exceed buffer size".to_string()));
         }
 
-        // Validate batching configuration
-        self.validate_batching_config(&config.batching)?;
-
-        Ok(())
-    }
-
-    /// Validate compression configuration
-    fn validate_compression_config(&self, config: &CompressionConfig) -> Result<()> {
-        match config.algorithm {
-            CompressionAlgorithm::None => {
-                warn!("Compression enabled but algorithm set to None");
-            }
-            CompressionAlgorithm::Lz4 => {
-                // LZ4 is fast, good choice for low latency
-            }
-            CompressionAlgorithm::Zstd => {
-                if config.level > 3 {
-                    warn!("High Zstd compression levels may increase latency");
-                }
-            }
-            CompressionAlgorithm::Snappy => {
-                // Snappy is balanced choice
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Validate batching configuration
-    fn validate_batching_config(&self, config: &BatchingConfig) -> Result<()> {
-        if config.enabled {
-            // Check batch delay isn't too high
-            if config.max_batch_delay_us > 1000 {
-                warn!("High batch delay may impact latency");
-            }
-
-            // Check batch size is reasonable
-            if config.max_batch_size > 100 {
-                warn!("Large batch sizes may increase memory usage");
-            }
+        // Memory validation
+        let estimated_memory_mb = self.estimate_memory_usage(config);
+        if estimated_memory_mb > self.context.available_memory_mb * 80 / 100 {
+            warn!(
+                "Configuration may use {estimated_memory_mb}MB memory, which is {}% of available {}MB",
+                (estimated_memory_mb * 100) / self.context.available_memory_mb,
+                self.context.available_memory_mb
+            );
         }
 
         Ok(())
     }
 
     /// Validate security configuration
-    fn validate_security_configuration(&self, config: &SecurityConfig) -> Result<()> {
-        debug!("Validating security configuration");
-
-        // Validate TLS configuration if enabled
-        if config.tls.enabled {
-            self.validate_tls_config(&config.tls)?;
-        }
-
-        // Validate authentication configuration
-        self.validate_auth_config(&config.authentication)?;
-
-        // Production security checks
-        if self.context.is_production {
-            if !config.tls.enabled {
-                warn!("TLS is disabled in production environment");
+    fn validate_security_config(&self, config: &MemoryStreamerConfig) -> Result<()> {
+        // TLS configuration validation
+        if config.security.tls.enabled {
+            if config.security.tls.cert_path.is_empty() {
+                return Err(Error::Configuration(
+                    "TLS certificate path cannot be empty when TLS is enabled".to_string(),
+                ));
             }
-            if !config.authentication.enabled {
-                warn!("Authentication is disabled in production environment");
+
+            if config.security.tls.key_path.is_empty() {
+                return Err(Error::Configuration(
+                    "TLS key path cannot be empty when TLS is enabled".to_string(),
+                ));
             }
         }
 
-        Ok(())
-    }
+        // Authentication validation
+        if config.security.authentication.enabled {
+            match config.security.authentication.method.as_str() {
+                "token" | "jwt" | "oauth" => {
+                    // Valid authentication methods
+                },
+                _ => {
+                    return Err(Error::Configuration(format!(
+                        "Unsupported authentication method: {}",
+                        config.security.authentication.method
+                    )));
+                },
+            }
+        }
 
-    /// Validate TLS configuration
-    fn validate_tls_config(&self, config: &TlsConfig) -> Result<()> {
-        if config.enabled {
-            // Check certificate file exists if provided
-            if let Some(ref cert_path) = config.cert_path {
-                if !Path::new(cert_path).exists() {
-                    return Err(crate::error::Error::Configuration {
-                        message: format!("TLS certificate file not found: {}", cert_path)
-                    });
-                }
+        // Rate limiting validation
+        if config.security.rate_limiting.enabled {
+            if config.security.rate_limiting.requests_per_second == 0 {
+                return Err(Error::Configuration(
+                    "Rate limit requests per second must be greater than 0".to_string(),
+                ));
             }
 
-            // Check private key file exists if provided
-            if let Some(ref key_path) = config.key_path {
-                if !Path::new(key_path).exists() {
-                    return Err(crate::error::Error::Configuration {
-                        message: format!("TLS private key file not found: {}", key_path)
-                    });
-                }
-            }
-
-            // Check CA file if provided
-            if let Some(ref ca_path) = config.ca_path {
-                if !Path::new(ca_path).exists() {
-                    return Err(crate::error::Error::Configuration {
-                        message: format!("TLS CA file not found: {}", ca_path)
-                    });
-                }
+            if config.security.rate_limiting.burst_size == 0 {
+                return Err(Error::Configuration(
+                    "Rate limit burst size must be greater than 0".to_string(),
+                ));
             }
         }
 
         Ok(())
     }
 
-    /// Validate authentication configuration
-    fn validate_auth_config(&self, config: &AuthenticationConfig) -> Result<()> {
-        if config.enabled {
-            // Basic authentication validation
-            // In practice would validate specific auth method configuration
-            debug!("Authentication is enabled - further validation would check specific auth methods");
+    /// Validate telemetry configuration
+    fn validate_telemetry_config(&self, config: &MemoryStreamerConfig) -> Result<()> {
+        // Metrics configuration
+        if config.telemetry.metrics.enabled && config.telemetry.metrics.prometheus.enabled {
+            let metrics_port = config.telemetry.metrics.prometheus.port;
+
+            if metrics_port == config.network.port {
+                return Err(Error::Configuration(
+                    "Metrics port cannot be the same as the main service port".to_string(),
+                ));
+            }
+
+            if metrics_port < 1024 {
+                warn!("Metrics port {metrics_port} may require special permissions");
+            }
+        }
+
+        // Tracing configuration
+        if config.telemetry.tracing.enabled && config.telemetry.tracing.jaeger.endpoint.is_empty() {
+            return Err(Error::Configuration(
+                "Jaeger endpoint cannot be empty when tracing is enabled".to_string(),
+            ));
+        }
+
+        // Logging configuration
+        if config.telemetry.logging.max_file_size_mb == 0 {
+            return Err(Error::Configuration(
+                "Log file max size must be greater than 0".to_string(),
+            ));
+        }
+
+        if config.telemetry.logging.max_files == 0 {
+            return Err(Error::Configuration("Max log files must be greater than 0".to_string()));
         }
 
         Ok(())
     }
 
-    /// Validate cross-component constraints and interactions
-    fn validate_cross_component_constraints(&self, config: &MemoryStreamerConfig) -> Result<()> {
-        debug!("Validating cross-component constraints");
+    /// Validate storage configuration
+    fn validate_storage_config(&self, config: &MemoryStreamerConfig) -> Result<()> {
+        // Storage config is nested under runtime
+        let storage_config = &config.runtime.storage;
 
-        // Check metrics port doesn't conflict with main port
-        if config.observability.metrics.enable_metrics {
-            if config.observability.metrics.metrics_port == config.network.port {
-                return Err(crate::error::Error::Configuration {
-                    message: "Metrics port cannot be the same as the main service port".to_string()
-                });
+        // Validate data directory
+        if storage_config.data_dir.is_empty() {
+            return Err(Error::Configuration("Data directory cannot be empty".to_string()));
+        }
+
+        // Validate retention policy
+        if storage_config.retention_hours == 0 {
+            return Err(Error::Configuration("Retention hours must be greater than 0".to_string()));
+        }
+
+        // Validate compression settings
+        if storage_config.compression.enabled {
+            match storage_config.compression.algorithm {
+                crate::config::schema::CompressionAlgorithm::Lz4
+                | crate::config::schema::CompressionAlgorithm::Snappy
+                | crate::config::schema::CompressionAlgorithm::Zstd
+                | crate::config::schema::CompressionAlgorithm::Gzip => {
+                    // Valid compression algorithms
+                },
+                crate::config::schema::CompressionAlgorithm::None => {
+                    warn!("Compression enabled but algorithm is set to None");
+                },
+            }
+
+            if storage_config.compression.level > 9 {
+                return Err(Error::Configuration("Compression level cannot exceed 9".to_string()));
             }
         }
 
+        Ok(())
+    }
+
+    /// Validate integration constraints and cross-cutting concerns
+    fn validate_integration_constraints(&self, config: &MemoryStreamerConfig) -> Result<()> {
         // Check if TLS and high performance settings are compatible
-        let worker_threads = config.performance.worker_threads.unwrap_or(self.context.cpu_cores);
+        let worker_threads =
+            config.telemetry.performance.worker_threads.unwrap_or(self.context.cpu_cores);
         if config.security.tls.enabled && worker_threads > 16 {
             warn!("TLS with many worker threads may impact performance");
         }
 
-        // Validate compression and batching interaction
-        if config.protocol.enable_compression && config.protocol.batching.enabled {
-            if config.protocol.compression.threshold > config.protocol.batching.max_batch_size * 100 {
-                warn!("Compression threshold may be too high for batch sizes");
+        // Validate protocol configuration compatibility (protocol config is under network)
+        if config.network.protocol.compression.enabled && config.security.tls.enabled {
+            // TLS already provides compression, warn about double compression
+            warn!("Both TLS and protocol compression enabled, may reduce efficiency");
+        }
+
+        // Check batch processing compatibility with network settings
+        if config.network.protocol.batching.enabled {
+            let max_batch_size = config.network.protocol.batching.max_batch_size;
+            if max_batch_size * 1024 > config.network.max_frame_size as u32 {
+                return Err(Error::Configuration(
+                    "Maximum batch size may exceed network frame size limits".to_string(),
+                ));
             }
         }
 
-        Ok(())
-    }
+        // Validate resource allocation doesn't exceed system limits
+        let total_connections = config.network.max_connections;
+        let estimated_memory_per_conn_kb = 64; // Conservative estimate
+        let estimated_connection_memory_mb =
+            (total_connections * estimated_memory_per_conn_kb) / 1024;
 
-    /// Validate environment-specific constraints
-    fn validate_environment_constraints(&self, config: &MemoryStreamerConfig) -> Result<()> {
-        debug!("Validating environment-specific constraints");
-
-        if self.context.is_production {
-            // Production-specific validations
-            self.validate_production_constraints(config)?;
-        } else {
-            // Development-specific validations
-            self.validate_development_constraints(config)?;
+        if estimated_connection_memory_mb as u64 > self.context.available_memory_mb / 2 {
+            warn!(
+                "Connection memory usage may exceed 50% of available memory ({estimated_connection_memory_mb} MB)"
+            );
         }
 
         Ok(())
     }
 
-    /// Validate production environment constraints
-    fn validate_production_constraints(&self, config: &MemoryStreamerConfig) -> Result<()> {
-        // Ensure security is properly configured
-        if !config.security.tls.enabled && !config.security.authentication.enabled {
-            warn!("Production deployment without TLS or authentication");
-        }
+    /// Estimate memory usage based on configuration
+    fn estimate_memory_usage(&self, config: &MemoryStreamerConfig) -> u64 {
+        let worker_threads =
+            config.telemetry.performance.worker_threads.unwrap_or(self.context.cpu_cores) as u64;
+        let buffer_size_kb = config.telemetry.performance.buffer_size as u64 / 1024;
+        let max_connections = config.network.max_connections as u64;
 
-        // Validate performance targets are conservative
-        if config.performance.target_latency_p99_us < 10 {
-            warn!("Ultra-low latency targets in production require careful tuning");
-        }
+        // Rough estimates in MB
+        let worker_memory = worker_threads * buffer_size_kb / 1024; // Each worker has buffers
+        let connection_memory = max_connections * 64 / 1024; // ~64KB per connection
+        let base_memory = 100; // Base application memory
 
-        // Check observability is enabled
-        if !config.observability.metrics.enable_metrics {
-            warn!("Metrics disabled in production environment");
-        }
-
-        if !config.observability.tracing.enabled {
-            warn!("Tracing disabled in production environment");
-        }
-
-        Ok(())
+        worker_memory + connection_memory + base_memory
     }
 
-    /// Validate development environment constraints
-    fn validate_development_constraints(&self, _config: &MemoryStreamerConfig) -> Result<()> {
-        // Development environment is more permissive
-        debug!("Development environment validation passed");
-        Ok(())
+    /// Validate configuration against environment constraints
+    pub fn validate_environment_compatibility(
+        &self,
+        config: &MemoryStreamerConfig,
+    ) -> Result<Vec<String>> {
+        let mut warnings = Vec::new();
+
+        // Check if the system can handle the configuration
+        let estimated_memory = self.estimate_memory_usage(config);
+        if estimated_memory > self.context.available_memory_mb {
+            warnings.push(format!(
+                "Configuration requires {estimated_memory}MB but only {}MB available",
+                self.context.available_memory_mb
+            ));
+        }
+
+        // Check CPU requirements
+        let worker_threads =
+            config.telemetry.performance.worker_threads.unwrap_or(self.context.cpu_cores);
+        if worker_threads > self.context.cpu_cores {
+            warnings.push(format!(
+                "Configuration requires {worker_threads} worker threads but only {} CPU cores available",
+                self.context.cpu_cores
+            ));
+        }
+
+        // Check disk space for storage if enabled
+        if config.runtime.storage.enabled {
+            // We can't easily check available disk space without additional dependencies
+            // This would be a good place to add such checks in a real implementation
+            warnings.push("Disk space validation not implemented".to_string());
+        }
+
+        Ok(warnings)
+    }
+
+    /// Get the validation context
+    pub fn context(&self) -> &ValidationContext {
+        &self.context
     }
 }
 
@@ -378,180 +366,147 @@ impl Default for ConfigValidator {
     }
 }
 
-impl ValidationContext {
-    /// Detect system characteristics for validation context
-    pub fn detect_system() -> Self {
-        let cpu_cores = num_cpus::get();
-        let available_memory = Self::detect_available_memory();
-        let network_interfaces = Self::detect_network_interfaces();
-        let is_production = std::env::var("NODE_ENV")
-            .map(|env| env == "production")
-            .unwrap_or(false);
+/// Custom validation functions for use with the validator crate
+/// Validate that a port is in the valid range
+fn validate_port(port: u16) -> std::result::Result<(), ValidationError> {
+    if port == 0 {
+        return Err(ValidationError::new("port_zero"));
+    }
+    Ok(())
+}
 
-        Self {
-            cpu_cores,
-            available_memory,
-            network_interfaces,
-            is_production,
+/// Validate that a path is not empty
+fn validate_non_empty_path(path: &str) -> std::result::Result<(), ValidationError> {
+    if path.trim().is_empty() {
+        return Err(ValidationError::new("empty_path"));
+    }
+    Ok(())
+}
+
+/// Validate memory size is reasonable
+fn validate_memory_size(size: u64) -> std::result::Result<(), ValidationError> {
+    if size == 0 {
+        return Err(ValidationError::new("zero_memory"));
+    }
+    if size > 1024 * 1024 * 1024 * 100 {
+        // 100GB limit
+        return Err(ValidationError::new("excessive_memory"));
+    }
+    Ok(())
+}
+
+/// Format validation errors for user display
+pub fn format_validation_errors(errors: &ValidationErrors) -> Vec<String> {
+    let mut formatted = Vec::new();
+
+    for (_field, field_errors) in errors.field_errors() {
+        for error in field_errors {
+            let message = match error.code.as_ref() {
+                "port_zero" => "Port cannot be zero".to_string(),
+                "empty_path" => "Path cannot be empty".to_string(),
+                "zero_memory" => "Memory size must be greater than zero".to_string(),
+                "excessive_memory" => "Memory size is too large".to_string(),
+                "length" => {
+                    if let Some(min) = error.params.get("min") {
+                        format!("Value must be at least {min} characters")
+                    } else if let Some(max) = error.params.get("max") {
+                        format!("Value must be at most {max} characters")
+                    } else {
+                        "Invalid length".to_string()
+                    }
+                },
+                "range" => {
+                    if let Some(min) = error.params.get("min") {
+                        if let Some(max) = error.params.get("max") {
+                            format!("Value must be between {min} and {max}")
+                        } else {
+                            format!("Value must be at least {min}")
+                        }
+                    } else if let Some(max) = error.params.get("max") {
+                        format!("Value must be at most {max}")
+                    } else {
+                        "Value out of range".to_string()
+                    }
+                },
+                _ => error.message.clone().unwrap_or_else(|| "Invalid value".into()).to_string(),
+            };
+            formatted.push(message);
         }
     }
 
-    /// Detect available system memory
-    fn detect_available_memory() -> u64 {
-        // Simplified memory detection - in practice would use system APIs
-        8 * 1024 * 1024 * 1024 // 8GB default
-    }
-
-    /// Detect available network interfaces
-    fn detect_network_interfaces() -> Vec<IpAddr> {
-        // Simplified interface detection - in practice would enumerate interfaces
-        vec![
-            "127.0.0.1".parse().unwrap(),
-            "0.0.0.0".parse().unwrap(),
-        ]
-    }
+    formatted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::*;
+    use crate::config::schema::MemoryStreamerConfig;
 
-    fn create_test_context() -> ValidationContext {
-        ValidationContext {
-            cpu_cores: 8,
-            available_memory: 16 * 1024 * 1024 * 1024, // 16GB
-            network_interfaces: vec![
-                "127.0.0.1".parse().unwrap(),
-                "0.0.0.0".parse().unwrap(),
-            ],
-            is_production: false,
-        }
-    }
-
-    fn create_valid_config() -> MemoryStreamerConfig {
-        MemoryStreamerConfig {
-            network: NetworkConfig {
-                bind_address: "127.0.0.1".to_string(),
-                port: 8080,
-                max_connections: 1000,
-                connection_timeout: std::time::Duration::from_millis(5000),
-                keep_alive: KeepAliveConfig {
-                    enabled: true,
-                    idle_time: 600,
-                    interval: 60,
-                    probes: 9,
-                },
-                buffers: NetworkBufferConfig {
-                    send_buffer_size: 65536,
-                    recv_buffer_size: 65536,
-                },
-            },
-            protocol: ProtocolConfig {
-                max_payload_size: 1024 * 1024, // 1MB
-                frame_timeout: std::time::Duration::from_millis(1000),
-                enable_compression: false,
-                compression: CompressionConfig {
-                    algorithm: CompressionAlgorithm::None,
-                    level: 1,
-                    threshold: 1024,
-                },
-                batching: BatchingConfig {
-                    enabled: false,
-                    max_batch_size: 10,
-                    max_batch_delay_us: 100,
-                },
-            },
-            performance: PerformanceConfig {
-                target_latency_p99_us: 100,
-                max_throughput: 1_000_000,
-                worker_threads: Some(4),
-                numa_awareness: false,
-                cpu_affinity: CpuAffinityConfig {
-                    enabled: false,
-                    cpu_set: vec![],
-                },
-                memory: MemoryConfig {
-                    message_pool_size: 1000,
-                    connection_pool_size: 100,
-                    enable_hugepages: false,
-                },
-                io: IoConfig {
-                    io_uring: false,
-                    epoll_timeout_ms: 1,
-                    max_events: 1024,
-                },
-            },
-            observability: ObservabilityConfig {
-                metrics: MetricsConfig {
-                    enable_metrics: true,
-                    metrics_port: 9090,
-                    export_interval_secs: 10,
-                    retention_days: 7,
-                },
-                tracing: TracingConfig {
-                    enabled: true,
-                    level: TracingLevel::Info,
-                    output: TracingOutput::Stdout,
-                    sample_rate: 1.0,
-                },
-                health: HealthConfig {
-                    enabled: true,
-                    port: 8081,
-                    path: "/health".to_string(),
-                },
-            },
-            security: SecurityConfig {
-                tls: TlsConfig {
-                    enabled: false,
-                    cert_path: Some("cert.pem".to_string()),
-                    key_path: Some("key.pem".to_string()),
-                    ca_path: None,
-                    verify_client: false,
-                },
-                authentication: AuthenticationConfig {
-                    enabled: false,
-                    method: AuthenticationMethod::None,
-                    token_secret: Some("a".repeat(32)),
-                },
-                access_control: AccessControlConfig {
-                    enabled: false,
-                    allow_list: vec![],
-                    deny_list: vec![],
-                },
-            },
-        }
+    #[test]
+    fn test_validator_creation() {
+        let validator = ConfigValidator::new();
+        assert!(validator.context.cpu_cores > 0);
+        assert!(validator.context.available_memory_mb > 0);
     }
 
     #[test]
-    fn test_valid_configuration() {
-        let validator = ConfigValidator::with_context(create_test_context());
-        let config = create_valid_config();
-        assert!(validator.validate(&config).is_ok());
+    fn test_default_config_validation() {
+        let config = MemoryStreamerConfig::default();
+        let result = ConfigValidator::validate(&config);
+        // Default configuration should be valid
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn test_invalid_bind_address() {
-        let validator = ConfigValidator::with_context(create_test_context());
-        let mut config = create_valid_config();
-        config.network.bind_address = "invalid-address".to_string();
-        assert!(validator.validate(&config).is_err());
+    fn test_invalid_port_validation() {
+        let mut config = MemoryStreamerConfig::default();
+        config.network.port = 0;
+
+        let validator = ConfigValidator::new();
+        let result = validator.validate_network_config(&config);
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_port_conflict() {
-        let validator = ConfigValidator::with_context(create_test_context());
-        let mut config = create_valid_config();
-        config.observability.metrics.metrics_port = config.network.port;
-        assert!(validator.validate(&config).is_err());
+    fn test_memory_estimation() {
+        let validator = ConfigValidator::new();
+        let config = MemoryStreamerConfig::default();
+
+        let memory_usage = validator.estimate_memory_usage(&config);
+        assert!(memory_usage > 0);
     }
 
     #[test]
-    fn test_performance_warnings() {
-        let validator = ConfigValidator::with_context(create_test_context());
-        let mut config = create_valid_config();
-        config.performance.worker_threads = Some(32); // More than 2x CPU cores
-        // Should pass validation but generate warnings
-        assert!(validator.validate(&config).is_ok());
+    fn test_environment_compatibility() {
+        let validator = ConfigValidator::new();
+        let config = MemoryStreamerConfig::default();
+
+        let warnings = validator.validate_environment_compatibility(&config);
+        assert!(warnings.is_ok());
+    }
+
+    #[test]
+    fn test_custom_validation_functions() {
+        assert!(validate_port(8080).is_ok());
+        assert!(validate_port(0).is_err());
+
+        assert!(validate_non_empty_path("/valid/path").is_ok());
+        assert!(validate_non_empty_path("").is_err());
+        assert!(validate_non_empty_path("   ").is_err());
+
+        assert!(validate_memory_size(1024).is_ok());
+        assert!(validate_memory_size(0).is_err());
+    }
+
+    #[test]
+    fn test_format_validation_errors() {
+        let mut errors = ValidationErrors::new();
+        errors.add("port", ValidationError::new("port_zero"));
+        errors.add("path", ValidationError::new("empty_path"));
+
+        let formatted = format_validation_errors(&errors);
+        assert_eq!(formatted.len(), 2);
+        assert!(formatted.contains(&"Port cannot be zero".to_string()));
+        assert!(formatted.contains(&"Path cannot be empty".to_string()));
     }
 }
