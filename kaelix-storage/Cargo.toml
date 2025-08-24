@@ -1,0 +1,70 @@
+[package]
+name = "kaelix-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+description = "Ultra-high-performance distributed storage engine for MemoryStreamer"
+
+[dependencies]
+# Internal crates
+kaelix-core = { path = "../kaelix-core" }
+kaelix-cluster = { path = "../kaelix-cluster" }
+
+# Essential async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization and data handling
+serde = { workspace = true }
+bincode = { workspace = true }
+bytes = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+metrics = { workspace = true }
+
+# High-performance data structures
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+smallvec = { workspace = true }
+crossbeam = { workspace = true }
+
+# Time utilities
+chrono = { workspace = true }
+
+# Cryptographic utilities for checksums
+blake3 = { workspace = true }
+crc32fast = { workspace = true }
+
+# File system operations
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+criterion = { workspace = true }
+proptest = { workspace = true }
+test-case = { workspace = true }
+rstest = { workspace = true }
+
+[features]
+default = ["memory-backend"]
+
+# Storage backend features
+memory-backend = []
+file-backend = []
+distributed-backend = []
+
+# Development and testing features
+dev = []

@@ -5,6 +5,7 @@ members = [
     "kaelix-publisher",
     "kaelix-consumer",
     "kaelix-cluster",
+    "kaelix-storage",
 ]
 resolver = "2"
 
