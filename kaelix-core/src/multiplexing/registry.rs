@@ -9,8 +9,8 @@ use parking_lot::{Mutex, RwLock};
 use smallvec::SmallVec;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, AtomicU8, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Number of shards for cache-line optimization and parallelism

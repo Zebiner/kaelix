@@ -6,8 +6,8 @@ use crate::telemetry::performance::PerformanceMetric;
 use crossbeam::queue::SegQueue;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -303,8 +303,8 @@ impl AdvancedScheduler {
         estimated_duration: Option<Duration>,
         numa_preference: Option<NodeId>,
         task_fn: impl std::future::Future<Output = std::result::Result<(), TaskExecutionError>>
-        + Send
-        + 'static,
+            + Send
+            + 'static,
     ) -> Result<TaskId> {
         if !self.is_running.load(Ordering::SeqCst) {
             return Err(SchedulerError::NotRunning);

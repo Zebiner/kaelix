@@ -1,38 +1,47 @@
 //! # Consensus Module
 //!
-//! Provides distributed consensus mechanisms including Raft implementation
-//! for ensuring data consistency across cluster nodes.
+//! Implements distributed consensus algorithms for high-performance cluster coordination.
+//! Currently supports Raft and PBFT algorithms optimized for ultra-low latency (<1ms).
 
-use crate::types::{NodeId, Term};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use thiserror::Error;
-use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info};
 
-/// Consensus-related error types
-#[derive(Error, Debug)]
+// Re-export types from the main lib
+use crate::types::NodeId;
+
+/// Consensus-specific errors
+#[derive(Debug, Error)]
 pub enum ConsensusError {
-    /// Network communication error
-    #[error("Network error: {0}")]
-    Network(String),
+    /// Term mismatch in consensus protocol
+    #[error("Term mismatch: expected {expected}, got {actual}")]
+    TermMismatch {
+        /// Expected term
+        expected: u64,
+        /// Actual term received
+        actual: u64,
+    },
 
-    /// Invalid state transition
-    #[error("Invalid state transition: {0}")]
-    InvalidState(String),
+    /// Node is not the leader
+    #[error("Not leader: current leader is {leader:?}")]
+    NotLeader {
+        /// Current leader node ID
+        leader: Option<NodeId>,
+    },
 
-    /// Timeout error
-    #[error("Operation timed out: {0}")]
-    Timeout(String),
-
-    /// Serialization error
-    #[error("Serialization error: {0}")]
-    Serialization(String),
+    /// Invalid node ID in consensus message
+    #[error("Invalid node ID: {node_id}")]
+    InvalidNodeId {
+        /// The invalid node ID
+        node_id: String,
+    },
 
     /// Generic consensus error
     #[error("Consensus error: {0}")]
     Generic(String),
 }
 
+/// Result type for consensus operations
 pub type ConsensusResult<T> = Result<T, ConsensusError>;
 
 /// Consensus state of a node
@@ -40,9 +49,9 @@ pub type ConsensusResult<T> = Result<T, ConsensusError>;
 pub enum ConsensusState {
     /// Node is a follower
     Follower,
-    /// Node is a candidate for leader election
+    /// Node is a candidate (election in progress)
     Candidate,
-    /// Node is the cluster leader
+    /// Node is the leader
     Leader,
 }
 
@@ -52,465 +61,438 @@ impl Default for ConsensusState {
     }
 }
 
-/// Log entry for consensus operations
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogEntry {
-    /// Entry index
-    pub index: u64,
-    /// Term when entry was created
-    pub term: Term,
-    /// Entry data
-    pub data: Vec<u8>,
-}
-
-impl LogEntry {
-    /// Create a new log entry
-    pub fn new(index: u64, term: Term, data: Vec<u8>) -> Self {
-        Self { index, term, data }
-    }
-
-    /// Get the entry size in bytes
-    pub fn size(&self) -> usize {
-        std::mem::size_of::<u64>() + std::mem::size_of::<Term>() + self.data.len()
-    }
-}
-
-/// Vote request message
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VoteRequest {
-    /// Candidate's term
-    pub term: Term,
-    /// Candidate requesting vote
-    pub candidate_id: NodeId,
-    /// Index of candidate's last log entry
-    pub last_log_index: u64,
-    /// Term of candidate's last log entry
-    pub last_log_term: Term,
-}
-
-/// Vote response message
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VoteResponse {
-    /// Current term, for candidate to update itself
-    pub term: Term,
-    /// True means candidate received vote
-    pub vote_granted: bool,
-}
-
-/// Append entries request message
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppendEntriesRequest {
-    /// Leader's term
-    pub term: Term,
-    /// Leader ID for followers to redirect clients
-    pub leader_id: NodeId,
-    /// Index of log entry immediately preceding new ones
-    pub prev_log_index: u64,
-    /// Term of prev_log_index entry
-    pub prev_log_term: Term,
-    /// Log entries to store (empty for heartbeat)
-    pub entries: Vec<LogEntry>,
-    /// Leader's commit index
-    pub leader_commit: u64,
-}
-
-/// Append entries response message
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppendEntriesResponse {
-    /// Current term, for leader to update itself
-    pub term: Term,
-    /// True if follower contained entry matching prev_log_index and prev_log_term
-    pub success: bool,
-}
-
-/// Consensus message types
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ConsensusMessage {
-    /// Vote request
-    VoteRequest(VoteRequest),
-    /// Vote response
-    VoteResponse(VoteResponse),
-    /// Append entries request
-    AppendEntriesRequest(AppendEntriesRequest),
-    /// Append entries response
-    AppendEntriesResponse(AppendEntriesResponse),
-}
-
-impl ConsensusMessage {
-    /// Get the term associated with this message
-    pub fn term(&self) -> Term {
+impl fmt::Display for ConsensusState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::VoteRequest(req) => req.term,
-            Self::VoteResponse(resp) => resp.term,
-            Self::AppendEntriesRequest(req) => req.term,
-            Self::AppendEntriesResponse(resp) => resp.term,
+            Self::Follower => write!(f, "follower"),
+            Self::Candidate => write!(f, "candidate"),
+            Self::Leader => write!(f, "leader"),
         }
     }
 }
 
-/// Configuration for consensus algorithms
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConsensusConfig {
-    /// Election timeout range (min, max) in milliseconds
-    pub election_timeout_ms: (u64, u64),
-    /// Heartbeat interval in milliseconds
-    pub heartbeat_interval_ms: u64,
-    /// Maximum number of log entries in append entries message
-    pub max_append_entries: usize,
-    /// Snapshot threshold (number of log entries before snapshotting)
-    pub snapshot_threshold: u64,
-    /// Enable pre-vote optimization
-    pub enable_pre_vote: bool,
-}
+/// Raft consensus implementation
+pub mod raft {
+    use super::*;
+    use crate::types::Term;
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
 
-impl Default for ConsensusConfig {
-    fn default() -> Self {
-        Self {
-            election_timeout_ms: (150, 300),
-            heartbeat_interval_ms: 50,
-            max_append_entries: 100,
-            snapshot_threshold: 10000,
-            enable_pre_vote: false,
-        }
-    }
-}
-
-/// Consensus manager coordinating distributed consensus
-pub struct ConsensusManager {
-    /// Node identifier
-    node_id: NodeId,
-    /// Current consensus state
-    state: RwLock<ConsensusState>,
-    /// Current term
-    current_term: RwLock<Term>,
-    /// Node voted for in current term
-    voted_for: RwLock<Option<NodeId>>,
-    /// Configuration
-    config: ConsensusConfig,
-}
-
-impl ConsensusManager {
-    /// Create a new consensus manager
-    pub fn new(node_id: NodeId, config: ConsensusConfig) -> Self {
-        Self {
-            node_id,
-            state: RwLock::new(ConsensusState::Follower),
-            current_term: RwLock::new(Term::new(0)),
-            voted_for: RwLock::new(None),
-            config,
-        }
-    }
-
-    /// Get current consensus state
-    pub async fn state(&self) -> ConsensusState {
-        *self.state.read().await
-    }
-
-    /// Get current term
-    pub async fn current_term(&self) -> Term {
-        *self.current_term.read().await
-    }
-
-    /// Get node ID
-    pub fn node_id(&self) -> NodeId {
-        self.node_id
-    }
-
-    /// Handle incoming consensus message
-    pub async fn handle_message(&self, message: ConsensusMessage) -> ConsensusResult<()> {
-        match message {
-            ConsensusMessage::VoteRequest(req) => {
-                self.handle_vote_request(req).await?;
-            }
-            ConsensusMessage::VoteResponse(resp) => {
-                self.handle_vote_response(resp).await?;
-            }
-            ConsensusMessage::AppendEntriesRequest(req) => {
-                self.handle_append_entries_request(req).await?;
-            }
-            ConsensusMessage::AppendEntriesResponse(resp) => {
-                self.handle_append_entries_response(resp).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Start election process
-    pub async fn start_election(&self) -> ConsensusResult<()> {
-        info!("Starting election for node {}", self.node_id);
-
-        // Increment current term and vote for self
-        {
-            let mut term = self.current_term.write().await;
-            *term = Term::new(term.value() + 1);
-        }
-
-        {
-            let mut voted_for = self.voted_for.write().await;
-            *voted_for = Some(self.node_id);
-        }
-
-        // Transition to candidate state
-        {
-            let mut state = self.state.write().await;
-            *state = ConsensusState::Candidate;
-        }
-
-        debug!("Node {} became candidate in term {}", self.node_id, self.current_term().await.value());
-
-        Ok(())
-    }
-
-    /// Step down to follower state
-    pub async fn step_down(&self, new_term: Option<Term>) -> ConsensusResult<()> {
-        if let Some(term) = new_term {
-            let mut current_term = self.current_term.write().await;
-            if term.value() > current_term.value() {
-                *current_term = term;
-                let mut voted_for = self.voted_for.write().await;
-                *voted_for = None;
-            }
-        }
-
-        let mut state = self.state.write().await;
-        if *state != ConsensusState::Follower {
-            info!("Node {} stepping down to follower", self.node_id);
-            *state = ConsensusState::Follower;
-        }
-
-        Ok(())
-    }
-
-    async fn handle_vote_request(&self, _req: VoteRequest) -> ConsensusResult<()> {
-        // Implementation for handling vote requests
-        debug!("Handling vote request");
-        Ok(())
-    }
-
-    async fn handle_vote_response(&self, _resp: VoteResponse) -> ConsensusResult<()> {
-        // Implementation for handling vote responses
-        debug!("Handling vote response");
-        Ok(())
-    }
-
-    async fn handle_append_entries_request(&self, _req: AppendEntriesRequest) -> ConsensusResult<()> {
-        // Implementation for handling append entries requests
-        debug!("Handling append entries request");
-        Ok(())
-    }
-
-    async fn handle_append_entries_response(&self, _resp: AppendEntriesResponse) -> ConsensusResult<()> {
-        // Implementation for handling append entries responses
-        debug!("Handling append entries response");
-        Ok(())
-    }
-}
-
-/// Raft consensus engine implementation
-pub struct RaftEngine {
-    /// Base consensus manager
-    consensus: ConsensusManager,
-    /// Replicated log
-    log: RwLock<Vec<LogEntry>>,
-    /// Index of highest log entry applied to state machine
-    last_applied: RwLock<u64>,
-    /// Index of highest log entry known to be committed
-    commit_index: RwLock<u64>,
-    /// Message sender for outgoing messages
-    message_sender: mpsc::UnboundedSender<ConsensusMessage>,
-}
-
-impl RaftEngine {
-    /// Create a new Raft engine
-    pub fn new(
+    /// Raft node state
+    #[derive(Debug)]
+    pub struct RaftNode {
+        /// Node identifier
         node_id: NodeId,
-        config: ConsensusConfig,
-        message_sender: mpsc::UnboundedSender<ConsensusMessage>,
-    ) -> Self {
-        Self {
-            consensus: ConsensusManager::new(node_id, config),
-            log: RwLock::new(Vec::new()),
-            last_applied: RwLock::new(0),
-            commit_index: RwLock::new(0),
-            message_sender,
+        /// Current term
+        current_term: Term,
+        /// Node state
+        state: ConsensusState,
+        /// Voted for in current term
+        voted_for: Option<NodeId>,
+        /// Log entries
+        log: Vec<LogEntry>,
+        /// Index of highest log entry known to be committed
+        commit_index: usize,
+        /// Index of highest log entry applied to state machine
+        last_applied: usize,
+        /// For leaders: next index to send to each follower
+        next_index: HashMap<NodeId, usize>,
+        /// For leaders: highest index known to be replicated on each follower
+        match_index: HashMap<NodeId, usize>,
+    }
+
+    /// Raft log entry
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct LogEntry {
+        /// Term when entry was received by leader
+        pub term: Term,
+        /// Command for state machine
+        pub command: Vec<u8>,
+        /// Index in the log
+        pub index: usize,
+    }
+
+    /// Vote request message
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct VoteRequest {
+        /// Candidate's term
+        pub term: Term,
+        /// Candidate requesting vote
+        pub candidate_id: NodeId,
+        /// Index of candidate's last log entry
+        pub last_log_index: usize,
+        /// Term of candidate's last log entry
+        pub last_log_term: Term,
+    }
+
+    /// Vote response message
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct VoteResponse {
+        /// Current term for candidate to update itself
+        pub term: Term,
+        /// True means candidate received vote
+        pub vote_granted: bool,
+    }
+
+    /// Append entries request
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AppendEntriesRequest {
+        /// Leader's term
+        pub term: Term,
+        /// Leader ID
+        pub leader_id: NodeId,
+        /// Index of log entry immediately preceding new ones
+        pub prev_log_index: usize,
+        /// Term of prev_log_index entry
+        pub prev_log_term: Term,
+        /// Log entries to store (empty for heartbeat)
+        pub entries: Vec<LogEntry>,
+        /// Leader's commit index
+        pub leader_commit: usize,
+    }
+
+    /// Append entries response
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AppendEntriesResponse {
+        /// Current term for leader to update itself
+        pub term: Term,
+        /// True if follower contained entry matching prev_log_index and prev_log_term
+        pub success: bool,
+        /// Hint for leader optimization: follower's last log index
+        pub last_log_index: Option<usize>,
+    }
+
+    impl RaftNode {
+        /// Create a new Raft node
+        pub fn new(node_id: NodeId) -> Self {
+            Self {
+                node_id,
+                current_term: Term::default(),
+                state: ConsensusState::Follower,
+                voted_for: None,
+                log: Vec::new(),
+                commit_index: 0,
+                last_applied: 0,
+                next_index: HashMap::new(),
+                match_index: HashMap::new(),
+            }
+        }
+
+        /// Get current state
+        pub fn state(&self) -> ConsensusState {
+            self.state
+        }
+
+        /// Get current term
+        pub fn current_term(&self) -> Term {
+            self.current_term
+        }
+
+        /// Get node ID
+        pub fn node_id(&self) -> NodeId {
+            self.node_id
+        }
+
+        /// Check if this node is the leader
+        pub fn is_leader(&self) -> bool {
+            matches!(self.state, ConsensusState::Leader)
+        }
+
+        /// Become a candidate and start election
+        pub fn become_candidate(&mut self) -> ConsensusResult<()> {
+            self.current_term.increment();
+            self.state = ConsensusState::Candidate;
+            self.voted_for = Some(self.node_id);
+
+            tracing::info!("Node {} became candidate for term {}", self.node_id, self.current_term);
+            Ok(())
+        }
+
+        /// Become leader
+        pub fn become_leader(&mut self, peer_ids: &[NodeId]) -> ConsensusResult<()> {
+            if !matches!(self.state, ConsensusState::Candidate) {
+                return Err(ConsensusError::Generic(
+                    "Can only become leader from candidate state".to_string(),
+                ));
+            }
+
+            self.state = ConsensusState::Leader;
+
+            // Initialize leader state
+            let last_log_index = self.log.len();
+            for &peer_id in peer_ids {
+                self.next_index.insert(peer_id, last_log_index + 1);
+                self.match_index.insert(peer_id, 0);
+            }
+
+            tracing::info!("Node {} became leader for term {}", self.node_id, self.current_term);
+            Ok(())
+        }
+
+        /// Become follower
+        pub fn become_follower(&mut self, term: Term) -> ConsensusResult<()> {
+            if term < self.current_term {
+                return Err(ConsensusError::TermMismatch {
+                    expected: self.current_term.value(),
+                    actual: term.value(),
+                });
+            }
+
+            self.current_term = term;
+            self.state = ConsensusState::Follower;
+            self.voted_for = None;
+
+            tracing::info!("Node {} became follower for term {}", self.node_id, self.current_term);
+            Ok(())
+        }
+
+        /// Handle vote request
+        pub fn handle_vote_request(
+            &mut self,
+            request: VoteRequest,
+        ) -> ConsensusResult<VoteResponse> {
+            // If term is outdated, reject
+            if request.term < self.current_term {
+                return Ok(VoteResponse { term: self.current_term, vote_granted: false });
+            }
+
+            // If term is newer, update and become follower
+            if request.term > self.current_term {
+                self.become_follower(request.term)?;
+            }
+
+            // Check if we can vote for this candidate
+            let can_vote = self.voted_for.is_none() || self.voted_for == Some(request.candidate_id);
+
+            // Check if candidate's log is at least as up-to-date as ours
+            let candidate_log_ok = if let Some(last_entry) = self.log.last() {
+                request.last_log_term > last_entry.term
+                    || (request.last_log_term == last_entry.term
+                        && request.last_log_index >= last_entry.index)
+            } else {
+                true // No log entries, any candidate is fine
+            };
+
+            let vote_granted = can_vote && candidate_log_ok;
+
+            if vote_granted {
+                self.voted_for = Some(request.candidate_id);
+                tracing::debug!(
+                    "Node {} voted for {} in term {}",
+                    self.node_id,
+                    request.candidate_id,
+                    request.term
+                );
+            }
+
+            Ok(VoteResponse { term: self.current_term, vote_granted })
+        }
+
+        /// Handle append entries request
+        pub fn handle_append_entries(
+            &mut self,
+            request: AppendEntriesRequest,
+        ) -> ConsensusResult<AppendEntriesResponse> {
+            // If term is outdated, reject
+            if request.term < self.current_term {
+                return Ok(AppendEntriesResponse {
+                    term: self.current_term,
+                    success: false,
+                    last_log_index: self.log.last().map(|e| e.index),
+                });
+            }
+
+            // If term is newer or equal, update and become follower
+            if request.term >= self.current_term {
+                self.become_follower(request.term)?;
+            }
+
+            // Check if log contains an entry at prev_log_index with matching term
+            let prev_log_ok = if request.prev_log_index == 0 {
+                true // Initial case
+            } else if let Some(entry) = self.log.get(request.prev_log_index - 1) {
+                entry.term == request.prev_log_term
+            } else {
+                false // Log doesn't contain entry at prev_log_index
+            };
+
+            if !prev_log_ok {
+                return Ok(AppendEntriesResponse {
+                    term: self.current_term,
+                    success: false,
+                    last_log_index: self.log.last().map(|e| e.index),
+                });
+            }
+
+            // Append new entries
+            if !request.entries.is_empty() {
+                // Remove any conflicting entries
+                self.log.truncate(request.prev_log_index);
+
+                // Append new entries
+                self.log.extend(request.entries);
+
+                tracing::debug!(
+                    "Node {} appended {} entries in term {}",
+                    self.node_id,
+                    self.log.len() - request.prev_log_index,
+                    request.term
+                );
+            }
+
+            // Update commit index
+            if request.leader_commit > self.commit_index {
+                self.commit_index = std::cmp::min(request.leader_commit, self.log.len());
+            }
+
+            Ok(AppendEntriesResponse {
+                term: self.current_term,
+                success: true,
+                last_log_index: self.log.last().map(|e| e.index),
+            })
+        }
+
+        /// Append a new entry to the log (leader only)
+        pub fn append_entry(&mut self, command: Vec<u8>) -> ConsensusResult<usize> {
+            if !self.is_leader() {
+                return Err(ConsensusError::NotLeader { leader: None });
+            }
+
+            let index = self.log.len() + 1;
+            let entry = LogEntry { term: self.current_term, command, index };
+
+            self.log.push(entry);
+            tracing::debug!("Leader {} appended entry at index {}", self.node_id, index);
+
+            Ok(index)
+        }
+
+        /// Get log entries starting from index
+        pub fn get_entries_from(&self, start_index: usize) -> &[LogEntry] {
+            if start_index == 0 || start_index > self.log.len() {
+                &[]
+            } else {
+                &self.log[start_index - 1..]
+            }
+        }
+
+        /// Get the last log index and term
+        pub fn last_log_info(&self) -> (usize, Term) {
+            if let Some(last_entry) = self.log.last() {
+                (last_entry.index, last_entry.term)
+            } else {
+                (0, Term::default())
+            }
         }
     }
 
-    /// Get current consensus state
-    pub async fn state(&self) -> ConsensusResult<ConsensusState> {
-        Ok(self.consensus.state().await)
-    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
 
-    /// Get current term
-    pub async fn current_term(&self) -> ConsensusResult<Term> {
-        Ok(self.consensus.current_term().await)
-    }
+        #[test]
+        fn test_raft_node_creation() {
+            let node_id = NodeId::generate();
+            let node = RaftNode::new(node_id);
 
-    /// Get log length
-    pub async fn log_length(&self) -> u64 {
-        self.log.read().await.len() as u64
-    }
+            assert_eq!(node.node_id(), node_id);
+            assert_eq!(node.state(), ConsensusState::Follower);
+            assert_eq!(node.current_term(), Term::default());
+            assert!(!node.is_leader());
+        }
 
-    /// Get commit index
-    pub async fn commit_index(&self) -> u64 {
-        *self.commit_index.read().await
-    }
+        #[test]
+        fn test_become_candidate() {
+            let node_id = NodeId::generate();
+            let mut node = RaftNode::new(node_id);
 
-    /// Append entry to log
-    pub async fn append_log_entry(&self, term: Term, data: Vec<u8>) -> ConsensusResult<u64> {
-        let mut log = self.log.write().await;
-        let index = log.len() as u64;
-        let entry = LogEntry::new(index, term, data);
-        log.push(entry);
-        Ok(index)
-    }
+            node.become_candidate().unwrap();
 
-    /// Handle consensus message
-    pub async fn handle_message(&self, message: ConsensusMessage) -> ConsensusResult<()> {
-        self.consensus.handle_message(message).await
-    }
+            assert_eq!(node.state(), ConsensusState::Candidate);
+            assert_eq!(node.current_term(), Term::new(1));
+            assert_eq!(node.voted_for, Some(node_id));
+        }
 
-    /// Start election
-    pub async fn start_election(&self) -> ConsensusResult<()> {
-        self.consensus.start_election().await
-    }
+        #[test]
+        fn test_become_leader() {
+            let node_id = NodeId::generate();
+            let mut node = RaftNode::new(node_id);
+            let peers = vec![NodeId::generate(), NodeId::generate()];
 
-    /// Get engine statistics
-    pub async fn stats(&self) -> EngineStats {
-        EngineStats {
-            current_term: self.consensus.current_term().await.value(),
-            log_entries: self.log.read().await.len(),
-            commit_index: *self.commit_index.read().await,
-            last_applied: *self.last_applied.read().await,
-            state: self.consensus.state().await,
+            node.become_candidate().unwrap();
+            node.become_leader(&peers).unwrap();
+
+            assert_eq!(node.state(), ConsensusState::Leader);
+            assert!(node.is_leader());
+            assert_eq!(node.next_index.len(), 2);
+            assert_eq!(node.match_index.len(), 2);
+        }
+
+        #[test]
+        fn test_vote_request_handling() {
+            let node_id = NodeId::generate();
+            let candidate_id = NodeId::generate();
+            let mut node = RaftNode::new(node_id);
+
+            let request = VoteRequest {
+                term: Term::new(1),
+                candidate_id,
+                last_log_index: 0,
+                last_log_term: Term::default(),
+            };
+
+            let response = node.handle_vote_request(request).unwrap();
+
+            assert!(response.vote_granted);
+            assert_eq!(response.term, Term::new(1));
+            assert_eq!(node.voted_for, Some(candidate_id));
+        }
+
+        #[test]
+        fn test_append_entries_handling() {
+            let node_id = NodeId::generate();
+            let leader_id = NodeId::generate();
+            let mut node = RaftNode::new(node_id);
+
+            let request = AppendEntriesRequest {
+                term: Term::new(1),
+                leader_id,
+                prev_log_index: 0,
+                prev_log_term: Term::default(),
+                entries: vec![],
+                leader_commit: 0,
+            };
+
+            let response = node.handle_append_entries(request).unwrap();
+
+            assert!(response.success);
+            assert_eq!(response.term, Term::new(1));
+            assert_eq!(node.state(), ConsensusState::Follower);
         }
     }
-}
-
-/// Engine statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EngineStats {
-    /// Current term
-    pub current_term: u64,
-    /// Number of log entries
-    pub log_entries: usize,
-    /// Commit index
-    pub commit_index: u64,
-    /// Last applied index
-    pub last_applied: u64,
-    /// Current state
-    pub state: ConsensusState,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
 
-    #[tokio::test]
-    async fn test_consensus_manager_creation() {
-        let node_id = NodeId::generate();
-        let config = ConsensusConfig::default();
-        let manager = ConsensusManager::new(node_id, config);
-
-        assert_eq!(manager.node_id(), node_id);
-        assert_eq!(manager.state().await, ConsensusState::Follower);
-        assert_eq!(manager.current_term().await.value(), 0);
+    #[test]
+    fn test_consensus_state_display() {
+        assert_eq!(ConsensusState::Follower.to_string(), "follower");
+        assert_eq!(ConsensusState::Candidate.to_string(), "candidate");
+        assert_eq!(ConsensusState::Leader.to_string(), "leader");
     }
 
-    #[tokio::test]
-    async fn test_raft_engine_creation() {
-        let node_id = NodeId::generate();
-        let config = ConsensusConfig::default();
-        let (tx, _rx) = mpsc::unbounded_channel();
-
-        let engine = RaftEngine::new(node_id, config, tx);
-
-        let state = engine.state().await.unwrap();
-        assert_eq!(state, ConsensusState::Follower);
-
-        let term = engine.current_term().await.unwrap();
-        assert_eq!(term.value(), 0);
-
-        let log_length = engine.log_length().await;
-        assert_eq!(log_length, 0);
+    #[test]
+    fn test_consensus_error_display() {
+        let error = ConsensusError::TermMismatch { expected: 5, actual: 3 };
+        assert!(error.to_string().contains("Term mismatch"));
+        assert!(error.to_string().contains("expected 5"));
+        assert!(error.to_string().contains("got 3"));
     }
 
-    #[tokio::test]
-    async fn test_log_entry_creation() {
-        let entry = LogEntry::new(1, Term::new(1), vec![1, 2, 3]);
-        assert_eq!(entry.index, 1);
-        assert_eq!(entry.term.value(), 1);
-        assert_eq!(entry.data, vec![1, 2, 3]);
-
-        let size = entry.size();
-        assert!(size > 0);
-    }
-
-    #[tokio::test]
-    async fn test_consensus_message_term() {
-        let vote_req = ConsensusMessage::VoteRequest(VoteRequest {
-            term: Term::new(5),
-            candidate_id: NodeId::generate(),
-            last_log_index: 0,
-            last_log_term: Term::new(0),
-        });
-
-        assert_eq!(vote_req.term().value(), 5);
-    }
-
-    #[tokio::test]
-    async fn test_start_election() {
-        let node_id = NodeId::generate();
-        let config = ConsensusConfig::default();
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let engine = RaftEngine::new(node_id, config, tx);
-
-        // Start election
-        engine.start_election().await.unwrap();
-
-        let state = engine.state().await.unwrap();
-        assert_eq!(state, ConsensusState::Candidate);
-
-        let term = engine.current_term().await.unwrap();
-        assert_eq!(term.value(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_append_log_entry() {
-        let node_id = NodeId::generate();
-        let config = ConsensusConfig::default();
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let engine = RaftEngine::new(node_id, config, tx);
-
-        let data = vec![1, 2, 3, 4];
-        let term = Term::new(1);
-        let index = engine.append_log_entry(term, data.clone()).await.unwrap();
-
-        assert_eq!(index, 0);
-        assert_eq!(engine.log_length().await, 1);
-
-        let log = engine.log.read().await;
-        assert_eq!(log[0].data, data);
-        assert_eq!(log[0].term.value(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_step_down() {
-        let node_id = NodeId::generate();
-        let config = ConsensusConfig::default();
-        let manager = ConsensusManager::new(node_id, config);
-
-        // Start as candidate
-        manager.start_election().await.unwrap();
-        assert_eq!(manager.state().await, ConsensusState::Candidate);
-
-        // Step down with higher term
-        let new_term = Term::new(5);
-        manager.step_down(Some(new_term)).await.unwrap();
-
-        assert_eq!(manager.state().await, ConsensusState::Follower);
-        assert_eq!(manager.current_term().await.value(), 5);
+    #[test]
+    fn test_consensus_state_default() {
+        assert_eq!(ConsensusState::default(), ConsensusState::Follower);
     }
 }

@@ -47,10 +47,13 @@
 //!
 //! Kaelix Cluster is organized into several key modules:
 //!
+//! - [`node`]: Node identification, addressing, and metadata management
 //! - [`membership`]: Node discovery, failure detection, and cluster membership management
 //! - [`consensus`]: Distributed consensus algorithms (Raft, PBFT) for state synchronization
 //! - [`communication`]: High-performance inter-node communication with zero-copy design
+//! - [`messages`]: Core message envelope system for all cluster communication
 //! - [`config`]: Configuration management and validation for cluster operations
+//! - [`time`]: Distributed timestamp and versioning types for event ordering and causality
 //! - [`error`]: Comprehensive error handling for distributed systems scenarios
 //!
 //! ## Performance Targets
@@ -89,6 +92,13 @@ pub mod config;
 pub mod consensus;
 pub mod error;
 pub mod membership;
+pub mod messages;
+pub mod node;
+pub mod time;
+
+// Testing infrastructure (conditionally compiled)
+#[cfg(any(test, feature = "dev"))]
+pub mod test_utils;
 
 // Re-exports for convenience
 pub use crate::{
@@ -97,6 +107,9 @@ pub use crate::{
     consensus::ConsensusState,
     error::{Error, Result},
     membership::{NodeInfo, NodeStatus},
+    messages::{ClusterMessage, MessageHeader, MessageId, MessagePayload},
+    node::{NodeId, NodeAddress, NodeMetadata, NodeRole, NodeCapabilities, NodeStatus as NodeOperationalStatus, NodeSelector, Protocol},
+    time::{LogicalClock, VectorClock, VersionVector, HybridLogicalClock, ClockSynchronizer, TimestampUtils, CausalityRelation, compare_causality},
 };
 
 /// Current types module for internal use
@@ -202,7 +215,7 @@ impl fmt::Display for ClusterStatus {
             Self::Left => "left",
             Self::Failed => "failed",
         };
-        write!(f, "{}", status)
+        write!(f, "{status}")
     }
 }
 
@@ -216,6 +229,7 @@ impl Default for ClusterStatus {
 pub type ClusterNodeId = types::NodeId;
 
 /// Cluster node implementation
+#[derive(Debug)]
 pub struct Node {
     /// Node configuration
     config: ClusterConfig,
@@ -233,10 +247,7 @@ impl Node {
         // Validate configuration before creating node
         config.validate_config()?;
 
-        Ok(Self {
-            config,
-            status: ClusterStatus::Initializing,
-        })
+        Ok(Self { config, status: ClusterStatus::Initializing })
     }
 
     /// Get the node's current cluster status
@@ -383,5 +394,50 @@ mod tests {
         assert_eq!(node.status(), ClusterStatus::Initializing);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_new_node_types() {
+        // Test new NodeId
+        let node_id = NodeId::generate();
+        assert!(node_id.is_valid());
+
+        // Test NodeAddress
+        let address = NodeAddress::tcp("127.0.0.1".parse().unwrap(), 8080);
+        assert!(address.is_valid());
+
+        // Test NodeMetadata
+        let metadata = NodeMetadata::new(node_id, address)
+            .with_role(NodeRole::Follower)
+            .with_region("us-west-2");
+        assert!(metadata.is_healthy());
+
+        // Test NodeSelector
+        let selector = NodeSelector::new()
+            .with_role(NodeRole::Leader)
+            .with_min_health_score(0.8);
+        assert!(!selector.is_empty());
+    }
+
+    #[test]
+    fn test_time_module_integration() {
+        // Test LogicalClock
+        let mut logical_clock = LogicalClock::new();
+        let timestamp = logical_clock.tick();
+        assert_eq!(timestamp, 1);
+
+        // Test VectorClock
+        let node_id = NodeId::generate();
+        let mut vector_clock = VectorClock::new(node_id);
+        let vector_time = vector_clock.tick();
+        assert_eq!(vector_time, 1);
+
+        // Test HybridLogicalClock
+        let hlc = HybridLogicalClock::now();
+        assert!(hlc.physical_time() > 0);
+
+        // Test TimestampUtils
+        let current_time = TimestampUtils::system_time_millis();
+        assert!(current_time > 0);
     }
 }

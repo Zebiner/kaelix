@@ -332,7 +332,7 @@ pub trait PluginObject: Send + Sync + 'static {
 
     /// Start the plugin
     async fn start_erased(&self, state: &mut Box<dyn Any + Send + Sync>)
-    -> Result<(), PluginError>;
+        -> Result<(), PluginError>;
 
     /// Stop the plugin
     async fn stop_erased(&self, state: &mut Box<dyn Any + Send + Sync>) -> Result<(), PluginError>;

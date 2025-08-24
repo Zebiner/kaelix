@@ -21,13 +21,13 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
     },
     time::{Duration, Instant},
 };
 use tokio::{
-    sync::{RwLock as AsyncRwLock, mpsc},
+    sync::{mpsc, RwLock as AsyncRwLock},
     time::timeout,
 };
 use tracing::{error, info, warn};

@@ -3,9 +3,7 @@
 //! Provides cluster membership protocols including SWIM, failure detection,
 //! and node discovery for distributed systems.
 
-use crate::{
-    error::{Error, Result},
-};
+use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -145,12 +143,7 @@ impl SwimMembership {
         let mut members = HashMap::new();
         members.insert(local_node.id, local_node.clone());
 
-        Self {
-            local_node,
-            members,
-            config,
-            suspects: HashSet::new(),
-        }
+        Self { local_node, members, config, suspects: HashSet::new() }
     }
 
     /// Get local node information
@@ -192,7 +185,7 @@ impl SwimMembership {
             self.suspects.remove(node_id);
             Ok(())
         } else {
-            Err(Error::membership(format!("Member {} not found", node_id)))
+            Err(Error::membership(format!("Member {node_id} not found")))
         }
     }
 
@@ -206,7 +199,7 @@ impl SwimMembership {
             }
             Ok(())
         } else {
-            Err(Error::membership(format!("Member {} not found", node_id)))
+            Err(Error::membership(format!("Member {node_id} not found")))
         }
     }
 
@@ -218,7 +211,7 @@ impl SwimMembership {
             error!("Member {} marked as dead", node_id);
             Ok(())
         } else {
-            Err(Error::membership(format!("Member {} not found", node_id)))
+            Err(Error::membership(format!("Member {node_id} not found")))
         }
     }
 
@@ -232,7 +225,7 @@ impl SwimMembership {
             }
             Ok(())
         } else {
-            Err(Error::membership(format!("Member {} not found", node_id)))
+            Err(Error::membership(format!("Member {node_id} not found")))
         }
     }
 
@@ -263,13 +256,16 @@ impl SwimMembership {
                     // Update if incarnation is newer
                     if update.incarnation > existing.incarnation {
                         *existing = update;
-                        debug!("Updated member {} with incarnation {}", existing.id, existing.incarnation);
+                        debug!(
+                            "Updated member {} with incarnation {}",
+                            existing.id, existing.incarnation
+                        );
                     }
-                }
+                },
                 None => {
                     // New member
                     self.add_member(update)?;
-                }
+                },
             }
         }
         Ok(())

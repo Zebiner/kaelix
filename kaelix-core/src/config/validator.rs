@@ -3,8 +3,8 @@
 //! Validates configuration settings for consistency, safety, and correctness.
 
 use crate::{
-    Error, Result,
     config::schema::{MemoryStreamerConfig, ValidationContext},
+    Error, Result,
 };
 use std::net::SocketAddr;
 use tracing::{debug, warn};

@@ -1,11 +1,11 @@
 //! Runtime system for Kaelix message processing.
 
-use crate::{Result, error::Error};
+use crate::{error::Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
     },
     time::{Duration, Instant},
 };

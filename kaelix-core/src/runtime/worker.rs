@@ -7,8 +7,8 @@ use crate::runtime::{affinity::CpuSet, metrics::RuntimeMetrics, scheduler::TaskQ
 use parking_lot::{Condvar, Mutex};
 use std::{
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},

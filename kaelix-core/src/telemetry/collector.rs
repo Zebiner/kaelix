@@ -6,15 +6,15 @@
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::telemetry::{
-    HistogramData, MetricKey, MetricsConfig, MetricsRegistryTrait, MetricsSnapshot, QuantileEntry,
-    Result, SummaryData,
     metrics::{AggregatedData, CollectorStats},
     registry::MetricType,
+    HistogramData, MetricKey, MetricsConfig, MetricsRegistryTrait, MetricsSnapshot, QuantileEntry,
+    Result, SummaryData,
 };
 
 /// High-performance metrics collector with time-series aggregation

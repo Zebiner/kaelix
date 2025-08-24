@@ -7,8 +7,8 @@ use crate::telemetry::{MetricKey, Result, TelemetryError};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 /// High-precision performance tracker optimized for ultra-low latency

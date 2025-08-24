@@ -3,8 +3,8 @@
 //! This module provides configuration management for distributed cluster operations.
 
 use crate::{
-    ClusterNodeId,
     error::{Error, Result},
+    ClusterNodeId,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf};

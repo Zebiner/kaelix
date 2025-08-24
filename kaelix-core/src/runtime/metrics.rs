@@ -8,8 +8,8 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
-        Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
     },
     time::{Duration, Instant},
 };

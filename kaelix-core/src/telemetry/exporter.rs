@@ -5,17 +5,17 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::{interval, MissedTickBehavior};
 
 use crate::telemetry::config::ExportTargetType;
 use crate::telemetry::{
-    BasicAuth, ExportConfig, ExportTarget, MetricsSnapshot, Result, TelemetryError,
-    registry::MetricsRegistry as ConcreteMetricsRegistry,
+    registry::MetricsRegistry as ConcreteMetricsRegistry, BasicAuth, ExportConfig, ExportTarget,
+    MetricsSnapshot, Result, TelemetryError,
 };
 
 /// High-performance metrics exporter with batching and retry logic

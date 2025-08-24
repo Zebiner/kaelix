@@ -86,7 +86,7 @@ impl CpuSet {
     /// Apply CPU affinity to the current thread (Linux implementation)
     #[cfg(target_os = "linux")]
     pub fn apply_to_current_thread(&self) -> RuntimeResult<()> {
-        use libc::{CPU_SET, CPU_ZERO, cpu_set_t, sched_setaffinity};
+        use libc::{cpu_set_t, sched_setaffinity, CPU_SET, CPU_ZERO};
         use std::mem;
 
         // Note: This unsafe block is necessary for low-level CPU affinity control

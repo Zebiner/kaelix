@@ -4,8 +4,8 @@
 //! and command-line arguments with proper error handling and validation.
 
 use crate::{
-    Error, Result,
     config::{schema::MemoryStreamerConfig, validator::ConfigValidator},
+    Error, Result,
 };
 use serde::de::DeserializeOwned;
 use std::{

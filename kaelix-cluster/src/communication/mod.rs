@@ -3,9 +3,7 @@
 //! Provides high-performance inter-node communication with zero-copy design
 //! and support for various transport protocols.
 
-use crate::{
-    error::{Error, Result},
-};
+use crate::error::{Error, Result};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -25,13 +23,22 @@ use tracing::{debug, info, warn};
 // Re-export NodeId from types module
 pub use crate::types::NodeId;
 
+/// Message handler function type
+pub type MessageHandler = Box<dyn Fn(NetworkMessage) -> Result<()> + Send + Sync>;
+
 /// Network message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkMessage {
     /// Ping message for connectivity check
-    Ping { timestamp: u64 },
+    Ping {
+        /// Timestamp when ping was sent
+        timestamp: u64,
+    },
     /// Pong response to ping
-    Pong { timestamp: u64 },
+    Pong {
+        /// Timestamp from the original ping
+        timestamp: u64,
+    },
     /// Membership update
     MembershipUpdate {
         /// Updated member information
@@ -160,7 +167,10 @@ impl TcpTransport {
     /// Start listening for incoming connections
     pub async fn start_listening(&mut self) -> Result<()> {
         let listener = TcpListener::bind(&self.bind_address).await.map_err(|e| {
-            Error::communication(format!("Failed to bind TCP listener to {}: {}", self.bind_address, e))
+            Error::communication(format!(
+                "Failed to bind TCP listener to {}: {}",
+                self.bind_address, e
+            ))
         })?;
 
         info!("TCP transport listening on {}", self.bind_address);
@@ -171,7 +181,7 @@ impl TcpTransport {
     /// Connect to a remote node
     pub async fn connect(&self, node_id: NodeId, address: SocketAddr) -> Result<()> {
         let _stream = TcpStream::connect(address).await.map_err(|e| {
-            Error::communication(format!("Failed to connect to {} at {}: {}", node_id, address, e))
+            Error::communication(format!("Failed to connect to {node_id} at {address}: {e}"))
         })?;
 
         let connection = ConnectionInfo::new(node_id, address);
@@ -186,9 +196,8 @@ impl TcpTransport {
         let connections = self.connections.read().await;
         if let Some(connection) = connections.get(node_id) {
             // Simulate sending message
-            let serialized = bincode::serialize(&message).map_err(|e| {
-                Error::configuration(format!("Failed to serialize message: {}", e))
-            })?;
+            let serialized = bincode::serialize(&message)
+                .map_err(|e| Error::configuration(format!("Failed to serialize message: {e}")))?;
 
             connection.record_bytes_sent(serialized.len() as u64);
             connection.record_message_sent();
@@ -196,7 +205,7 @@ impl TcpTransport {
             debug!("Sent message to node {}: {:?}", node_id, message);
             Ok(())
         } else {
-            Err(Error::communication(format!("No connection to node {}", node_id)))
+            Err(Error::communication(format!("No connection to node {node_id}")))
         }
     }
 
@@ -216,7 +225,7 @@ impl TcpTransport {
             info!("Disconnected from node {} at {}", node_id, connection.address);
             Ok(())
         } else {
-            Err(Error::communication(format!("No connection to node {}", node_id)))
+            Err(Error::communication(format!("No connection to node {node_id}")))
         }
     }
 
@@ -233,17 +242,13 @@ pub struct MessageRouter {
     /// Transport layer
     transport: Arc<TcpTransport>,
     /// Message handlers
-    handlers: HashMap<String, Box<dyn Fn(NetworkMessage) -> Result<()> + Send + Sync>>,
+    handlers: HashMap<String, MessageHandler>,
 }
 
 impl MessageRouter {
     /// Create a new message router
     pub fn new(node_id: NodeId, transport: TcpTransport) -> Self {
-        Self {
-            node_id,
-            transport: Arc::new(transport),
-            handlers: HashMap::new(),
-        }
+        Self { node_id, transport: Arc::new(transport), handlers: HashMap::new() }
     }
 
     /// Get node ID
@@ -283,27 +288,27 @@ impl MessageRouter {
                 debug!("Received ping message");
                 // Handle ping message
                 Ok(())
-            }
+            },
             NetworkMessage::Pong { .. } => {
                 debug!("Received pong message");
                 // Handle pong message
                 Ok(())
-            }
+            },
             NetworkMessage::MembershipUpdate { .. } => {
                 debug!("Received membership update");
                 // Handle membership update
                 Ok(())
-            }
+            },
             NetworkMessage::Consensus { .. } => {
                 debug!("Received consensus message");
                 // Handle consensus message
                 Ok(())
-            }
+            },
             NetworkMessage::Application { .. } => {
                 debug!("Received application message");
                 // Handle application message
                 Ok(())
-            }
+            },
         }
     }
 }
@@ -311,16 +316,27 @@ impl MessageRouter {
 /// Network transport trait
 pub trait NetworkTransport: Send + Sync {
     /// Connect to a remote address
-    fn connect(&self, node_id: NodeId, address: SocketAddr) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn connect(
+        &self,
+        node_id: NodeId,
+        address: SocketAddr,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     /// Send message to a node
-    fn send_message(&self, node_id: &NodeId, message: NetworkMessage) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn send_message(
+        &self,
+        node_id: &NodeId,
+        message: NetworkMessage,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     /// Disconnect from a node
     fn disconnect(&self, node_id: &NodeId) -> impl std::future::Future<Output = Result<()>> + Send;
 
     /// Get connection info
-    fn get_connection(&self, node_id: &NodeId) -> impl std::future::Future<Output = Option<ConnectionInfo>> + Send;
+    fn get_connection(
+        &self,
+        node_id: &NodeId,
+    ) -> impl std::future::Future<Output = Option<ConnectionInfo>> + Send;
 }
 
 impl NetworkTransport for TcpTransport {
@@ -378,7 +394,7 @@ mod tests {
     fn test_message_router() {
         let node_id = NodeId::generate();
         let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        
+
         // Create transport (this would fail in async context but we're just testing structure)
         let transport = TcpTransport {
             bind_address: address,
@@ -416,7 +432,7 @@ mod tests {
         conn.record_message_sent();
 
         let cloned = conn.clone();
-        
+
         assert_eq!(cloned.node_id, conn.node_id);
         assert_eq!(cloned.address, conn.address);
         assert_eq!(cloned.total_bytes_sent(), 100);

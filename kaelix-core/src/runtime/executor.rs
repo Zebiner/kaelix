@@ -4,16 +4,16 @@
 //! Optimized for ultra-low latency message streaming workloads.
 
 use crate::runtime::{
-    RuntimeError, RuntimeResult, TARGET_TASK_LATENCY_US, affinity::NumaTopology,
-    metrics::RuntimeMetrics,
+    affinity::NumaTopology, metrics::RuntimeMetrics, RuntimeError, RuntimeResult,
+    TARGET_TASK_LATENCY_US,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
     future::Future,
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
     },
     time::Duration,
 };

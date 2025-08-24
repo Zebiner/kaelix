@@ -4,10 +4,10 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 
 use crate::runtime::diagnostics::{HealthIndicator, HealthStatus};
 use crate::telemetry::{LogFormat, LogLevel, LoggingConfig, Result};

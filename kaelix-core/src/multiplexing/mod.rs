@@ -15,8 +15,8 @@ pub use backpressure::{BackpressureConfig, BackpressureManager};
 pub use error::{MultiplexerError, MultiplexerResult, Priority, StreamId};
 pub use registry::{StreamMetadata, StreamPriority, StreamRegistry, StreamState};
 
-use crate::MessageId;
 use crate::types::Timestamp;
+use crate::MessageId;
 
 use bytes::Bytes;
 use dashmap::DashMap;

@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{
-    Arc,
     atomic::{AtomicU64, Ordering},
+    Arc,
 };
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;

@@ -16,4 +16,4 @@ pub use schema::{
     KaelixConfig, MemoryStreamerConfig, NetworkConfig, PerformanceConfig, ProtocolConfig,
     SecurityConfig, StorageConfig, TelemetryConfig, TracingLevel, ValidationContext,
 };
-pub use validator::{ConfigValidator, format_validation_errors};
+pub use validator::{format_validation_errors, ConfigValidator};

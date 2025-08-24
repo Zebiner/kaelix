@@ -3,18 +3,18 @@
 //! Provides infrastructure for monitoring and reloading configurations dynamically
 
 use crate::{
-    Error, Result,
     config::{loader::ConfigLoader, schema::MemoryStreamerConfig},
+    Error, Result,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
     },
 };
-use tokio::sync::{RwLock, broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::info;
 
 /// Configuration change notification

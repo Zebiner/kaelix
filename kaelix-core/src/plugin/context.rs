@@ -2,8 +2,8 @@ use crate::{Error as MemoryStreamerError, Message};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::{
-    Arc,
     atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc,
 };
 use std::time::{Duration, Instant};
 use uuid::Uuid;

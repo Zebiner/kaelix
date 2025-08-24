@@ -2,23 +2,23 @@
 //!
 //! Demonstrates the ultra-high-performance stream multiplexing capabilities
 //! of MemoryStreamer with comprehensive testing and benchmarking.
-//! 
+//!
 //! Note: This example requires the 'experimental' feature flag to be enabled.
 
 #[cfg(feature = "experimental")]
-use kaelix_core::{Message, Topic};
+use bytes::Bytes;
 #[cfg(feature = "experimental")]
 use kaelix_core::multiplexing::*;
 #[cfg(feature = "experimental")]
-use std::sync::Arc;
+use kaelix_core::{Message, Topic};
 #[cfg(feature = "experimental")]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "experimental")]
+use std::sync::Arc;
 #[cfg(feature = "experimental")]
 use std::time::{Duration, Instant};
 #[cfg(feature = "experimental")]
 use tokio::time::timeout;
-#[cfg(feature = "experimental")]
-use bytes::Bytes;
 
 #[cfg(feature = "experimental")]
 #[tokio::main]

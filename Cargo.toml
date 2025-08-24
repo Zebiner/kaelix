@@ -21,6 +21,7 @@ keywords = ["streaming", "messaging", "broker", "async", "high-performance"]
 categories = ["network-programming", "asynchronous", "data-structures"]
 
 [workspace.dependencies]
+
 # Core dependencies
 uuid = { version = "1.11.1", features = ["v4", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -40,7 +41,10 @@ config = "0.14"
 color-eyre = "0.6"
 ahash = "0.8.11"
 # SECURITY FIX: validator upgrade to resolve ReDOS vulnerability
-validator = "0.20.0"  # Security fix: regex DoS vulnerability resolved
+validator = { version = "0.20", features = ["derive"] }
+
+
+
 
 # Cryptographic utilities - SECURITY UPDATED
 blake3 = "1.5"
@@ -48,6 +52,8 @@ crc32fast = "1.4"
 zeroize = "1.8.1"
 ring = "0.17"
 subtle = "2.6"
+kaelix-core = { path = "kaelix-core" }
+
 
 # High-performance data structures - SECURITY UPDATED
 parking_lot = "0.12"

@@ -7,8 +7,8 @@ use dashmap::DashMap;
 use kaelix_core::{Message, Result, Topic};
 use parking_lot::RwLock;
 use std::sync::{
-    Arc,
     atomic::{AtomicU64, Ordering},
+    Arc,
 };
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
@@ -171,8 +171,8 @@ impl Default for MessageBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kaelix_core::Topic;
     use bytes::Bytes;
+    use kaelix_core::Topic;
 
     #[tokio::test]
     async fn test_broker_lifecycle() {
@@ -195,7 +195,8 @@ mod tests {
         let topic = Topic::new("test.topic").expect("Failed to create topic");
         let mut receiver = broker.subscribe(&topic).expect("Failed to subscribe");
 
-        let message = Message::new("test.topic", Bytes::from("test message")).expect("Failed to create message");
+        let message = Message::new("test.topic", Bytes::from("test message"))
+            .expect("Failed to create message");
         broker.publish(&topic, &message).expect("Failed to publish");
 
         let received = receiver.recv().await.expect("Failed to receive message");
