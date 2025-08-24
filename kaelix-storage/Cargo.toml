@@ -21,6 +21,7 @@ kaelix-cluster = { path = "../kaelix-cluster" }
 # Essential async runtime
 tokio = { workspace = true }
 async-trait = { workspace = true }
+futures = "0.3"
 
 # Serialization and data handling
 serde = { workspace = true }
@@ -40,6 +41,12 @@ parking_lot = { workspace = true }
 dashmap = { workspace = true }
 smallvec = { workspace = true }
 crossbeam = { workspace = true }
+
+# Memory mapping
+memmap2 = "0.9"
+
+# Bitflags for entry flags
+bitflags = "2.4"
 
 # Time utilities
 chrono = { workspace = true }
