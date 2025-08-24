@@ -83,7 +83,7 @@ notify = { workspace = true, optional = true }
 
 # Plugin system support
 libloading = { workspace = true }
-validator = "0.20.0"
+validator = { version = "0.20.0", features = ["derive"] }
 zeroize.workspace = true
 
 [features]

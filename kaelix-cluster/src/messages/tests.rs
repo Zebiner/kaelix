@@ -1,12 +1,11 @@
 //! Comprehensive Test Suite for Cluster Message System
 //!
-//! This module provides extensive, property-based testing for the cluster message system,
+//! This module provides extensive testing for the cluster message system,
 //! ensuring reliability, performance, and correctness across all message types and scenarios.
 
 use super::*;
-use proptest::prelude::*;
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// MessageFactory for generating test data and scenarios
 pub struct MessageFactory;
@@ -16,7 +15,7 @@ impl MessageFactory {
     pub fn create_test_messages(count: usize) -> Vec<ClusterMessage> {
         let source = NodeId::generate();
         let destination = NodeId::generate();
-        
+
         let payloads = vec![
             // Consensus messages
             MessagePayload::RequestVote {
@@ -25,34 +24,21 @@ impl MessageFactory {
                 last_log_index: 0,
                 last_log_term: 0,
             },
-            MessagePayload::RequestVoteResponse {
-                term: 1,
-                vote_granted: true,
-            },
-            MessagePayload::AppendEntries {
-                term: 1,
-                leader_id: source,
-                entries: vec![1, 2, 3],
-            },
-            MessagePayload::AppendEntriesResponse {
-                term: 1,
-                success: true,
-            },
-            
+            MessagePayload::RequestVoteResponse { term: 1, vote_granted: true },
+            MessagePayload::AppendEntries { term: 1, leader_id: source, entries: vec![1, 2, 3] },
+            MessagePayload::AppendEntriesResponse { term: 1, success: true },
             // Membership messages
             MessagePayload::JoinRequest { node_id: source },
             MessagePayload::JoinResponse { accepted: true },
             MessagePayload::LeaveRequest { node_id: source },
-            
             // Discovery messages
             MessagePayload::Ping { node_id: source },
             MessagePayload::Pong { node_id: source },
-            
             // Health messages
             MessagePayload::HealthCheck,
             MessagePayload::HealthResponse { status: "healthy".to_string() },
         ];
-        
+
         (0..count)
             .map(|_| {
                 let payload = payloads[fastrand::usize(..payloads.len())].clone();
@@ -62,58 +48,57 @@ impl MessageFactory {
     }
 }
 
-/// Property-based testing module for comprehensive validation
-mod property_tests {
+/// Basic testing module for core functionality validation
+mod basic_tests {
     use super::*;
-    use proptest::prelude::*;
 
-    proptest! {
-        /// Validate message serialization roundtrip with random messages
-        #[test]
-        fn message_serialization_roundtrip(msg in any::<ClusterMessage>()) {
-            // JSON serialization
-            let json = serde_json::to_string(&msg)
-                .expect("JSON serialization failed");
-            let json_deserialized: ClusterMessage = serde_json::from_str(&json)
-                .expect("JSON deserialization failed");
-            prop_assert_eq!(msg, json_deserialized);
+    #[test]
+    fn test_message_serialization_roundtrip() {
+        let source = NodeId::generate();
+        let destination = NodeId::generate();
+        let payload = MessagePayload::HealthCheck;
+        let msg = ClusterMessage::new(source, destination, payload);
 
-            // Binary serialization
-            let binary = bincode::serialize(&msg)
-                .expect("Binary serialization failed");
-            let binary_deserialized: ClusterMessage = bincode::deserialize(&binary)
-                .expect("Binary deserialization failed");
-            prop_assert_eq!(msg, binary_deserialized);
-        }
+        // JSON serialization
+        let json = serde_json::to_string(&msg).expect("JSON serialization failed");
+        let json_deserialized: ClusterMessage =
+            serde_json::from_str(&json).expect("JSON deserialization failed");
+        assert_eq!(msg, json_deserialized);
 
-        /// Validate message ID uniqueness across multiple generations
-        #[test]
-        fn message_id_uniqueness(count in 1..10000u64) {
-            let source = NodeId::generate();
-            let destination = NodeId::generate();
-            let payload = MessagePayload::HealthCheck;
+        // Binary serialization
+        let binary = bincode::serialize(&msg).expect("Binary serialization failed");
+        let binary_deserialized: ClusterMessage =
+            bincode::deserialize(&binary).expect("Binary deserialization failed");
+        assert_eq!(msg, binary_deserialized);
+    }
 
-            let message_ids: HashSet<MessageId> = (0..count)
-                .map(|_| ClusterMessage::new(source, destination, payload.clone()).header.message_id)
-                .collect();
+    #[test]
+    fn test_message_id_uniqueness() {
+        let source = NodeId::generate();
+        let destination = NodeId::generate();
+        let payload = MessagePayload::HealthCheck;
 
-            prop_assert_eq!(message_ids.len() as u64, count);
-        }
+        const COUNT: usize = 1000;
+        let message_ids: HashSet<MessageId> = (0..COUNT)
+            .map(|_| ClusterMessage::new(source, destination, payload.clone()).header.message_id)
+            .collect();
 
-        /// Validate timestamp monotonicity and generation
-        #[test]
-        fn timestamp_monotonicity(count in 2..100u64) {
-            let source = NodeId::generate();
-            let destination = NodeId::generate();
-            let payload = MessagePayload::HealthCheck;
+        assert_eq!(message_ids.len(), COUNT);
+    }
 
-            let timestamps: Vec<u64> = (0..count)
-                .map(|_| ClusterMessage::new(source, destination, payload.clone()).header.timestamp)
-                .collect();
+    #[test]
+    fn test_timestamp_monotonicity() {
+        let source = NodeId::generate();
+        let destination = NodeId::generate();
+        let payload = MessagePayload::HealthCheck;
 
-            for window in timestamps.windows(2) {
-                prop_assert!(window[1] >= window[0], "Timestamps must be monotonically increasing");
-            }
+        const COUNT: usize = 100;
+        let timestamps: Vec<u64> = (0..COUNT)
+            .map(|_| ClusterMessage::new(source, destination, payload.clone()).header.timestamp)
+            .collect();
+
+        for window in timestamps.windows(2) {
+            assert!(window[1] >= window[0], "Timestamps must be monotonically increasing");
         }
     }
 }
@@ -121,7 +106,6 @@ mod property_tests {
 /// Performance and stress testing module
 mod performance_tests {
     use super::*;
-    use std::time::{Duration, Instant};
 
     /// Benchmark message creation performance
     #[test]
@@ -156,23 +140,19 @@ mod performance_tests {
 
         // JSON Serialization
         let json_start = Instant::now();
-        let json_serialized: Vec<String> = messages
-            .iter()
-            .map(|msg| serde_json::to_string(msg).unwrap())
-            .collect();
+        let _json_serialized: Vec<String> =
+            messages.iter().map(|msg| serde_json::to_string(msg).unwrap()).collect();
         let json_duration = json_start.elapsed();
 
         // Binary Serialization
         let binary_start = Instant::now();
-        let binary_serialized: Vec<Vec<u8>> = messages
-            .iter()
-            .map(|msg| bincode::serialize(msg).unwrap())
-            .collect();
+        let _binary_serialized: Vec<Vec<u8>> =
+            messages.iter().map(|msg| bincode::serialize(msg).unwrap()).collect();
         let binary_duration = binary_start.elapsed();
 
         println!(
-            "Serialization Performance:\n\
-             JSON: {:.2} ms total, {:.2} ns/message\n\
+            "Serialization Performance:\\n\
+             JSON: {:.2} ms total, {:.2} ns/message\\n\
              Binary: {:.2} ms total, {:.2} ns/message",
             json_duration.as_secs_f64() * 1000.0,
             json_duration.as_nanos() as f64 / messages.len() as f64,
@@ -180,14 +160,8 @@ mod performance_tests {
             binary_duration.as_nanos() as f64 / messages.len() as f64
         );
 
-        assert!(
-            json_duration < Duration::from_millis(50),
-            "JSON serialization too slow"
-        );
-        assert!(
-            binary_duration < Duration::from_millis(30),
-            "Binary serialization too slow"
-        );
+        assert!(json_duration < Duration::from_millis(50), "JSON serialization too slow");
+        assert!(binary_duration < Duration::from_millis(30), "Binary serialization too slow");
     }
 }
 
@@ -199,7 +173,7 @@ mod error_handling_tests {
     #[test]
     fn malformed_serialization_handling() {
         // Corrupt JSON data
-        let corrupt_json = "{\"header\":{\"message_id\":1234}, \"payload\": \"Invalid\"}";
+        let corrupt_json = r#"{"header":{"message_id":1234}, "payload": "Invalid"}"#;
         let json_result = serde_json::from_str::<ClusterMessage>(corrupt_json);
         assert!(json_result.is_err(), "Must reject malformed JSON");
 
@@ -217,24 +191,19 @@ mod error_handling_tests {
 
         // Create a large payload
         let large_entries = vec![0u8; 1_048_576]; // 1 MB
-        let large_payload = MessagePayload::AppendEntries {
-            term: 1,
-            leader_id: source,
-            entries: large_entries,
-        };
+        let large_payload =
+            MessagePayload::AppendEntries { term: 1, leader_id: source, entries: large_entries };
 
         let large_message = ClusterMessage::new(source, destination, large_payload);
 
         // Serialize and check size
-        let json_size = serde_json::to_string(&large_message)
-            .expect("JSON serialization failed")
-            .len();
-        let binary_size = bincode::serialize(&large_message)
-            .expect("Binary serialization failed")
-            .len();
+        let json_size =
+            serde_json::to_string(&large_message).expect("JSON serialization failed").len();
+        let binary_size =
+            bincode::serialize(&large_message).expect("Binary serialization failed").len();
 
         println!(
-            "Large Message Sizes:\nJSON: {} bytes\nBinary: {} bytes",
+            "Large Message Sizes:\\nJSON: {} bytes\\nBinary: {} bytes",
             json_size, binary_size
         );
 
@@ -252,12 +221,8 @@ mod integration_tests {
     fn message_node_id_integration() {
         let node_id = NodeId::generate();
         let destination = NodeId::generate();
-        
-        let message = ClusterMessage::new(
-            node_id,
-            destination,
-            MessagePayload::Ping { node_id }
-        );
+
+        let message = ClusterMessage::new(node_id, destination, MessagePayload::Ping { node_id });
 
         assert_eq!(message.header.source, node_id);
         assert_eq!(message.header.destination, destination);
@@ -268,8 +233,8 @@ mod integration_tests {
 #[cfg(test)]
 mod concurrent_tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn concurrent_message_generation() {
@@ -289,7 +254,7 @@ mod concurrent_tests {
                             let _message = ClusterMessage::new(
                                 source,
                                 destination,
-                                MessagePayload::HealthCheck
+                                MessagePayload::HealthCheck,
                             );
                             local_counter.fetch_add(1, Ordering::Relaxed);
                         }

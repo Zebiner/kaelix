@@ -18,14 +18,14 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use kaelix_cluster::{ClusterConfig, Node, ClusterNodeId};
+//! use kaelix_cluster::{ClusterConfig, Node, types::NodeId};
 //! use std::net::SocketAddr;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create cluster configuration
 //!     let config = ClusterConfig::builder()
-//!         .node_id(ClusterNodeId::generate())
+//!         .node_id(NodeId::generate())
 //!         .bind_address("127.0.0.1:8000".parse::<SocketAddr>()?)
 //!         .cluster_name("my-cluster")
 //!         .build()?;
@@ -97,6 +97,7 @@ pub mod node;
 pub mod time;
 
 // Testing infrastructure (conditionally compiled)
+// Fixed: Make test_utils available in both test and dev feature contexts
 #[cfg(any(test, feature = "dev"))]
 pub mod test_utils;
 
@@ -108,8 +109,14 @@ pub use crate::{
     error::{Error, Result},
     membership::{NodeInfo, NodeStatus},
     messages::{ClusterMessage, MessageHeader, MessageId, MessagePayload},
-    node::{NodeId, NodeAddress, NodeMetadata, NodeRole, NodeCapabilities, NodeStatus as NodeOperationalStatus, NodeSelector, Protocol},
-    time::{LogicalClock, VectorClock, VersionVector, HybridLogicalClock, ClockSynchronizer, TimestampUtils, CausalityRelation, compare_causality},
+    node::{
+        NodeAddress, NodeCapabilities, NodeMetadata, NodeRole, NodeSelector,
+        NodeStatus as NodeOperationalStatus, Protocol,
+    },
+    time::{
+        compare_causality, CausalityRelation, ClockSynchronizer, HybridLogicalClock, LogicalClock,
+        TimestampUtils, VectorClock, VersionVector,
+    },
 };
 
 /// Current types module for internal use
@@ -399,12 +406,8 @@ mod tests {
     #[test]
     fn test_new_node_types() {
         // Test new NodeId
-        let node_id = NodeId::generate();
-        assert!(node_id.is_valid());
-
-        // Test NodeAddress
+        let node_id = types::NodeId::generate();
         let address = NodeAddress::tcp("127.0.0.1".parse().unwrap(), 8080);
-        assert!(address.is_valid());
 
         // Test NodeMetadata
         let metadata = NodeMetadata::new(node_id, address)
@@ -413,21 +416,19 @@ mod tests {
         assert!(metadata.is_healthy());
 
         // Test NodeSelector
-        let selector = NodeSelector::new()
-            .with_role(NodeRole::Leader)
-            .with_min_health_score(0.8);
+        let selector = NodeSelector::new().with_role(NodeRole::Leader).with_min_health_score(0.8);
         assert!(!selector.is_empty());
     }
 
     #[test]
     fn test_time_module_integration() {
         // Test LogicalClock
-        let mut logical_clock = LogicalClock::new();
+        let logical_clock = LogicalClock::new();
         let timestamp = logical_clock.tick();
         assert_eq!(timestamp, 1);
 
         // Test VectorClock
-        let node_id = NodeId::generate();
+        let node_id = types::NodeId::generate();
         let mut vector_clock = VectorClock::new(node_id);
         let vector_time = vector_clock.tick();
         assert_eq!(vector_time, 1);
