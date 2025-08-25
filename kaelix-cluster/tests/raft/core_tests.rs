@@ -97,24 +97,29 @@ pub mod raft {
     use serde::{Deserialize, Serialize};
     use std::{
         collections::HashMap,
+        sync::atomic::{AtomicU64, Ordering},
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
     use tokio::sync::RwLock;
 
     // Export cluster integration module
     pub mod cluster;
+    // Export log replication module
+    pub mod log_replication;
+    // Export integrated coordinator module
+    pub mod integrated_coordinator;
 
     /// Log index type for strong typing
     pub type LogIndex = u64;
 
-    /// Raft configuration parameters
+    /// Raft configuration parameters optimized for <1ms elections
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct RaftConfig {
-        /// Minimum election timeout (150ms recommended)
+        /// Minimum election timeout (50ms for ultra-low latency)
         pub election_timeout_min: Duration,
-        /// Maximum election timeout (300ms recommended)  
+        /// Maximum election timeout (100ms for ultra-low latency)  
         pub election_timeout_max: Duration,
-        /// Heartbeat interval (50ms recommended, should be << election timeout)
+        /// Heartbeat interval (10ms for rapid leadership confirmation)
         pub heartbeat_interval: Duration,
         /// Maximum entries per append entries request for batching
         pub max_entries_per_append: usize,
@@ -126,25 +131,34 @@ pub mod raft {
         pub max_pipeline_depth: usize,
         /// Batch timeout for collecting entries
         pub batch_timeout: Duration,
+        /// Fast election optimization threshold (microseconds)
+        pub fast_election_threshold_us: u64,
+        /// Pre-vote timeout multiplier
+        pub pre_vote_timeout_multiplier: f32,
+        /// Leadership lease duration for optimization
+        pub leadership_lease_duration: Duration,
     }
 
     impl Default for RaftConfig {
         fn default() -> Self {
             Self {
-                election_timeout_min: Duration::from_millis(150),
-                election_timeout_max: Duration::from_millis(300),
-                heartbeat_interval: Duration::from_millis(50),
+                election_timeout_min: Duration::from_millis(50),   // Reduced for <1ms target
+                election_timeout_max: Duration::from_millis(100),  // Reduced for <1ms target
+                heartbeat_interval: Duration::from_millis(10),     // More frequent heartbeats
                 max_entries_per_append: 100,
                 snapshot_threshold: 10000,
-                pre_vote_enabled: true,
+                pre_vote_enabled: true,                            // Always enable for stability
                 max_pipeline_depth: 10,
-                batch_timeout: Duration::from_millis(10),
+                batch_timeout: Duration::from_millis(5),           // Faster batching
+                fast_election_threshold_us: 500,                   // 500μs threshold for fast elections
+                pre_vote_timeout_multiplier: 0.8,                  // Shorter pre-vote timeout
+                leadership_lease_duration: Duration::from_millis(50), // Short leadership lease
             }
         }
     }
 
     /// Fast election optimization configuration
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone)]
     pub struct FastElectionConfig {
         /// Enable single-round fast election when conditions are met
         pub enable_single_round: bool,
@@ -167,7 +181,76 @@ pub mod raft {
         }
     }
 
-    /// Raft node state machine
+    /// Enhanced election state tracking for performance optimization
+    #[derive(Debug, Default)]
+    struct ElectionState {
+        /// Pre-vote phase votes received
+        pre_votes_received: usize,
+        /// Election phase votes received  
+        votes_received: usize,
+        /// Start time of current election attempt
+        election_start: Option<Instant>,
+        /// Pre-vote start time
+        pre_vote_start: Option<Instant>,
+        /// Election attempt counter for this term
+        election_attempts: u32,
+        /// Track nodes that responded in current election
+        responded_nodes: Vec<NodeId>,
+        /// Network latency measurements
+        response_latencies: Vec<Duration>,
+        /// Whether we're eligible for fast election
+        fast_election_eligible: bool,
+    }
+
+    impl ElectionState {
+        /// Reset for new election
+        fn reset_for_election(&mut self) {
+            self.votes_received = 0;
+            self.election_start = Some(Instant::now());
+            self.election_attempts += 1;
+            self.responded_nodes.clear();
+            self.response_latencies.clear();
+            // Preserve fast_election_eligible and pre_vote state
+        }
+
+        /// Reset for new pre-vote
+        fn reset_for_pre_vote(&mut self) {
+            self.pre_votes_received = 0;
+            self.pre_vote_start = Some(Instant::now());
+            self.responded_nodes.clear();
+            self.response_latencies.clear();
+            self.fast_election_eligible = false;
+        }
+
+        /// Check if we can perform fast election
+        fn can_fast_elect(&self, config: &FastElectionConfig, cluster_size: usize) -> bool {
+            if !config.enable_single_round || cluster_size < 3 {
+                return false;
+            }
+
+            // Check network latency conditions
+            if !self.response_latencies.is_empty() {
+                let avg_latency = Duration::from_nanos(
+                    self.response_latencies.iter()
+                        .map(|d| d.as_nanos() as u64)
+                        .sum::<u64>() / self.response_latencies.len() as u64
+                );
+                if avg_latency > config.max_network_latency {
+                    return false;
+                }
+            }
+
+            self.fast_election_eligible && self.election_attempts == 1
+        }
+
+        /// Record response latency
+        fn record_response(&mut self, node_id: NodeId, latency: Duration) {
+            self.responded_nodes.push(node_id);
+            self.response_latencies.push(latency);
+        }
+    }
+
+    /// Raft node state machine with enhanced leader election
     #[derive(Debug)]
     pub struct RaftNode {
         /// Node identifier
@@ -192,16 +275,22 @@ pub mod raft {
         current_leader: Option<NodeId>,
         /// Last heartbeat received time
         last_heartbeat: Option<Instant>,
-        /// Election start time (for timeout)
-        election_start: Option<Instant>,
         /// Vote count for current election
         vote_count: usize,
         /// Cluster size for majority calculation
         pub cluster_size: usize,
         /// Configuration
         config: RaftConfig,
+        /// Fast election configuration
+        fast_config: FastElectionConfig,
+        /// Enhanced election state
+        election_state: ElectionState,
         /// Performance metrics
         metrics: RaftMetrics,
+        /// Leadership lease expiration
+        leadership_lease: Option<Instant>,
+        /// Request ID counter for tracking
+        request_counter: AtomicU64,
     }
 
     /// Serializable timestamp for log entries
@@ -268,6 +357,10 @@ pub mod raft {
         pub last_log_term: Term,
         /// Pre-vote flag (if pre-vote is enabled)
         pub pre_vote: bool,
+        /// Request timestamp for latency tracking
+        pub request_timestamp: u64,
+        /// Fast election hint
+        pub fast_election: bool,
     }
 
     /// Vote response message
@@ -281,6 +374,10 @@ pub mod raft {
         pub pre_vote: bool,
         /// Last log index for optimization
         pub last_log_index: Option<LogIndex>,
+        /// Response timestamp for latency calculation
+        pub response_timestamp: u64,
+        /// Network round-trip time hint
+        pub network_latency_us: Option<u64>,
     }
 
     /// Append entries request for log replication and heartbeats
@@ -300,6 +397,8 @@ pub mod raft {
         pub leader_commit: LogIndex,
         /// Request ID for pipeline tracking
         pub request_id: u64,
+        /// Leadership lease assertion
+        pub leadership_lease_ms: Option<u64>,
     }
 
     /// Append entries response with enhanced conflict resolution
@@ -317,6 +416,8 @@ pub mod raft {
         pub conflict_term: Option<Term>,
         /// Request ID for pipeline tracking
         pub request_id: u64,
+        /// Processing latency in microseconds
+        pub processing_latency_us: Option<u64>,
     }
 
     /// Install snapshot request for log compaction
@@ -343,13 +444,17 @@ pub mod raft {
         pub term: Term,
     }
 
-    /// Performance and operational metrics
+    /// Performance and operational metrics enhanced for election tracking
     #[derive(Debug, Default, Clone)]
     pub struct RaftMetrics {
         /// Total elections started
         pub elections_started: u64,
         /// Elections won
         pub elections_won: u64,
+        /// Pre-vote phases completed
+        pub pre_votes_completed: u64,
+        /// Fast elections completed
+        pub fast_elections_completed: u64,
         /// Total log entries appended
         pub entries_appended: u64,
         /// Total log entries committed
@@ -360,8 +465,18 @@ pub mod raft {
         pub avg_replication_latency: Duration,
         /// Last election duration
         pub last_election_duration: Option<Duration>,
+        /// Fastest election duration achieved
+        pub fastest_election_duration: Option<Duration>,
+        /// Average election duration
+        pub avg_election_duration: Duration,
+        /// Election timeout count
+        pub election_timeouts: u64,
+        /// Split vote scenarios
+        pub split_votes: u64,
         /// Current log size in bytes
         pub log_size_bytes: usize,
+        /// Network latency samples
+        pub network_latency_samples: Vec<Duration>,
     }
 
     impl LogEntry {
@@ -379,9 +494,10 @@ pub mod raft {
     }
 
     impl RaftNode {
-        /// Create a new Raft node with configuration
+        /// Create a new Raft node with enhanced election configuration
         pub fn new(node_id: NodeId, cluster_size: usize, config: RaftConfig) -> Self {
-            tracing::info!("Creating Raft node {} for cluster size {}", node_id, cluster_size);
+            tracing::info!("Creating Raft node {} for cluster size {} with optimized election config", 
+                node_id, cluster_size);
 
             Self {
                 node_id,
@@ -395,11 +511,14 @@ pub mod raft {
                 match_index: HashMap::new(),
                 current_leader: None,
                 last_heartbeat: None,
-                election_start: None,
                 vote_count: 0,
                 cluster_size,
                 config,
+                fast_config: FastElectionConfig::default(),
+                election_state: ElectionState::default(),
                 metrics: RaftMetrics::default(),
+                leadership_lease: None,
+                request_counter: AtomicU64::new(0),
             }
         }
 
@@ -445,12 +564,12 @@ pub mod raft {
             &self.metrics
         }
 
-        /// Check if election timeout has occurred
+        /// Check if election timeout has occurred with intelligent randomization
         pub fn is_election_timeout(&self) -> bool {
             match self.state {
                 ConsensusState::Follower => {
                     if let Some(last_heartbeat) = self.last_heartbeat {
-                        let timeout = self.generate_election_timeout();
+                        let timeout = self.generate_adaptive_election_timeout();
                         last_heartbeat.elapsed() > timeout
                     } else {
                         // No heartbeat received yet, start election
@@ -458,8 +577,13 @@ pub mod raft {
                     }
                 },
                 ConsensusState::Candidate => {
-                    if let Some(election_start) = self.election_start {
-                        let timeout = self.generate_election_timeout();
+                    if let Some(election_start) = self.election_state.election_start {
+                        let timeout = if self.election_state.can_fast_elect(&self.fast_config, self.cluster_size) {
+                            // Fast election timeout - much shorter
+                            Duration::from_micros(self.config.fast_election_threshold_us)
+                        } else {
+                            self.generate_adaptive_election_timeout()
+                        };
                         election_start.elapsed() > timeout
                     } else {
                         true
@@ -469,29 +593,104 @@ pub mod raft {
             }
         }
 
-        /// Generate randomized election timeout to prevent split votes
-        fn generate_election_timeout(&self) -> Duration {
+        /// Generate adaptive election timeout based on cluster conditions
+        fn generate_adaptive_election_timeout(&self) -> Duration {
             use rand::Rng;
             let mut rng = rand::thread_rng();
-            let timeout_ms = rng.gen_range(
-                self.config.election_timeout_min.as_millis()..=self.config.election_timeout_max.as_millis()
-            );
+            
+            // Base timeout range
+            let mut min_ms = self.config.election_timeout_min.as_millis();
+            let mut max_ms = self.config.election_timeout_max.as_millis();
+
+            // Adapt based on recent network latency
+            if !self.metrics.network_latency_samples.is_empty() {
+                let avg_latency = self.metrics.network_latency_samples.iter()
+                    .map(|d| d.as_millis())
+                    .sum::<u128>() / self.metrics.network_latency_samples.len() as u128;
+                
+                // Add adaptive buffer based on network conditions
+                let latency_buffer = (avg_latency * 3).max(10); // At least 10ms buffer
+                min_ms = min_ms.max(latency_buffer);
+                max_ms = max_ms.max(min_ms + 20);
+            }
+
+            // Reduce timeout for small clusters (faster elections)
+            if self.cluster_size <= 3 {
+                min_ms = min_ms * 2 / 3;
+                max_ms = max_ms * 2 / 3;
+            }
+
+            // Add jitter to prevent split votes
+            let jitter_factor = rng.gen_range(0.8..1.2);
+            let timeout_ms = rng.gen_range(min_ms..=max_ms) as f64 * jitter_factor;
+            
             Duration::from_millis(timeout_ms as u64)
         }
 
-        /// Start election and become candidate
+        /// Start pre-vote phase (if enabled) or direct election
         pub async fn start_election(&mut self) -> ConsensusResult<RequestVoteRequest> {
-            tracing::info!("Node {} starting election for term {}", self.node_id, self.current_term.value() + 1);
+            if self.config.pre_vote_enabled && self.election_state.pre_vote_start.is_none() {
+                // Start with pre-vote phase
+                self.start_pre_vote().await
+            } else {
+                // Start actual election
+                self.start_actual_election().await
+            }
+        }
 
+        /// Start pre-vote phase to check electability
+        async fn start_pre_vote(&mut self) -> ConsensusResult<RequestVoteRequest> {
+            tracing::debug!("Node {} starting pre-vote for term {}", 
+                self.node_id, self.current_term.value() + 1);
+
+            self.election_state.reset_for_pre_vote();
+            
+            let (last_log_index, last_log_term) = self.last_log_info();
+            let request_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+
+            Ok(RequestVoteRequest {
+                term: Term::new(self.current_term.value() + 1), // Next term for pre-vote
+                candidate_id: self.node_id,
+                last_log_index,
+                last_log_term,
+                pre_vote: true,
+                request_timestamp,
+                fast_election: false, // Pre-votes are not fast
+            })
+        }
+
+        /// Start actual election after successful pre-vote or directly
+        async fn start_actual_election(&mut self) -> ConsensusResult<RequestVoteRequest> {
+            tracing::info!("Node {} starting election for term {}", 
+                self.node_id, self.current_term.value() + 1);
+
+            // Transition to candidate state
             self.current_term.increment();
             self.state = ConsensusState::Candidate;
             self.voted_for = Some(self.node_id);
             self.current_leader = None;
-            self.election_start = Some(Instant::now());
             self.vote_count = 1; // Vote for ourselves
+            
+            // Reset election state for actual election
+            self.election_state.reset_for_election();
+            
+            // Update metrics
             self.metrics.elections_started += 1;
 
             let (last_log_index, last_log_term) = self.last_log_info();
+            let request_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+
+            // Check if we can do fast election
+            let fast_election = self.election_state.can_fast_elect(&self.fast_config, self.cluster_size);
+            if fast_election {
+                tracing::debug!("Node {} attempting fast election", self.node_id);
+            }
 
             Ok(RequestVoteRequest {
                 term: self.current_term,
@@ -499,21 +698,84 @@ pub mod raft {
                 last_log_index,
                 last_log_term,
                 pre_vote: false,
+                request_timestamp,
+                fast_election,
             })
         }
 
-        /// Handle incoming vote request
+        /// Handle incoming vote request with enhanced pre-vote logic
         pub async fn handle_vote_request(&mut self, request: RequestVoteRequest) -> ConsensusResult<RequestVoteResponse> {
-            tracing::debug!("Node {} handling vote request from {} for term {}", 
-                self.node_id, request.candidate_id, request.term);
+            let request_latency_start = Instant::now();
+            
+            tracing::debug!("Node {} handling {} request from {} for term {}", 
+                self.node_id, 
+                if request.pre_vote { "pre-vote" } else { "vote" },
+                request.candidate_id, 
+                request.term);
 
+            // Calculate request processing latency
+            let processing_start = Instant::now();
+
+            let response = if request.pre_vote {
+                self.handle_pre_vote_request(request).await?
+            } else {
+                self.handle_actual_vote_request(request).await?
+            };
+
+            // Record network latency sample if available
+            if let Some(network_latency_us) = response.network_latency_us {
+                let latency = Duration::from_micros(network_latency_us);
+                if self.metrics.network_latency_samples.len() > 100 {
+                    self.metrics.network_latency_samples.remove(0); // Keep recent samples
+                }
+                self.metrics.network_latency_samples.push(latency);
+            }
+
+            tracing::trace!("Vote request processed in {}μs", processing_start.elapsed().as_micros());
+            Ok(response)
+        }
+
+        /// Handle pre-vote request
+        async fn handle_pre_vote_request(&mut self, request: RequestVoteRequest) -> ConsensusResult<RequestVoteResponse> {
+            // Pre-vote logic: don't increment term or change state
+            let can_vote = self.would_vote_for_candidate(&request);
+            let response_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+
+            // Calculate network latency hint
+            let network_latency_us = if request.request_timestamp > 0 {
+                let rtt = response_timestamp.saturating_sub(request.request_timestamp);
+                Some((rtt / 2000) as u64) // Convert to microseconds, rough RTT/2
+            } else {
+                None
+            };
+
+            Ok(RequestVoteResponse {
+                term: self.current_term,
+                vote_granted: can_vote,
+                pre_vote: true,
+                last_log_index: Some(self.last_log_info().0),
+                response_timestamp,
+                network_latency_us,
+            })
+        }
+
+        /// Handle actual vote request
+        async fn handle_actual_vote_request(&mut self, request: RequestVoteRequest) -> ConsensusResult<RequestVoteResponse> {
             // If term is outdated, reject immediately
             if request.term < self.current_term {
                 return Ok(RequestVoteResponse {
                     term: self.current_term,
                     vote_granted: false,
-                    pre_vote: request.pre_vote,
+                    pre_vote: false,
                     last_log_index: Some(self.last_log_info().0),
+                    response_timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64,
+                    network_latency_us: None,
                 });
             }
 
@@ -522,34 +784,71 @@ pub mod raft {
                 self.become_follower(request.term)?;
             }
 
-            // Check if we can vote for this candidate
-            let can_vote = self.voted_for.is_none() || self.voted_for == Some(request.candidate_id);
+            let can_vote = self.would_vote_for_candidate(&request);
+            let vote_granted = can_vote;
 
-            // Check if candidate's log is at least as up-to-date as ours
-            let candidate_log_ok = self.is_log_up_to_date(request.last_log_index, request.last_log_term);
-
-            let vote_granted = can_vote && candidate_log_ok;
-
-            if vote_granted && !request.pre_vote {
+            if vote_granted {
                 self.voted_for = Some(request.candidate_id);
                 self.last_heartbeat = Some(Instant::now()); // Reset election timer
                 tracing::debug!("Node {} voted for {} in term {}", 
                     self.node_id, request.candidate_id, request.term);
             }
 
+            let response_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+
+            // Calculate network latency hint
+            let network_latency_us = if request.request_timestamp > 0 {
+                let rtt = response_timestamp.saturating_sub(request.request_timestamp);
+                Some((rtt / 2000) as u64) // Convert to microseconds, rough RTT/2
+            } else {
+                None
+            };
+
             Ok(RequestVoteResponse {
                 term: self.current_term,
                 vote_granted,
-                pre_vote: request.pre_vote,
+                pre_vote: false,
                 last_log_index: Some(self.last_log_info().0),
+                response_timestamp,
+                network_latency_us,
             })
         }
 
-        /// Handle vote response from other nodes
+        /// Check if we would vote for a candidate (without side effects)
+        fn would_vote_for_candidate(&self, request: &RequestVoteRequest) -> bool {
+            // Check if we can vote for this candidate
+            let can_vote = self.voted_for.is_none() || self.voted_for == Some(request.candidate_id);
+            
+            // Check if candidate's log is at least as up-to-date as ours
+            let candidate_log_ok = self.is_log_up_to_date(request.last_log_index, request.last_log_term);
+            
+            can_vote && candidate_log_ok
+        }
+
+        /// Handle vote response from other nodes with enhanced election logic
         pub async fn handle_vote_response(&mut self, response: RequestVoteResponse) -> ConsensusResult<bool> {
             if !self.is_candidate() {
                 return Ok(false);
             }
+
+            let response_latency = if response.response_timestamp > 0 {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                Duration::from_nanos(now.saturating_sub(response.response_timestamp))
+            } else {
+                Duration::from_millis(1) // Default estimate
+            };
+
+            // Record response for election optimization
+            // Note: We don't have the sender NodeId in the response, so we use a placeholder
+            // In a real implementation, the message routing would provide sender context
+            let placeholder_node = NodeId::generate(); // This should come from message routing
+            self.election_state.record_response(placeholder_node, response_latency);
 
             // If we receive a higher term, become follower
             if response.term > self.current_term {
@@ -557,7 +856,12 @@ pub mod raft {
                 return Ok(false);
             }
 
-            // Count valid votes for our current term
+            // Handle pre-vote response
+            if response.pre_vote {
+                return self.handle_pre_vote_response(response).await;
+            }
+
+            // Handle actual vote response
             if response.term == self.current_term && response.vote_granted {
                 self.vote_count += 1;
 
@@ -572,7 +876,33 @@ pub mod raft {
             Ok(false)
         }
 
-        /// Become leader after winning election
+        /// Handle pre-vote response
+        async fn handle_pre_vote_response(&mut self, response: RequestVoteResponse) -> ConsensusResult<bool> {
+            if response.vote_granted {
+                self.election_state.pre_votes_received += 1;
+                
+                // Check if we have majority pre-votes
+                let majority = (self.cluster_size / 2) + 1;
+                if self.election_state.pre_votes_received >= majority {
+                    tracing::debug!("Node {} received majority pre-votes, starting election", self.node_id);
+                    
+                    // Mark eligible for fast election if conditions are met
+                    if self.election_state.can_fast_elect(&self.fast_config, self.cluster_size) {
+                        self.election_state.fast_election_eligible = true;
+                    }
+                    
+                    self.metrics.pre_votes_completed += 1;
+                    
+                    // Pre-vote successful, start actual election
+                    // This would need to trigger a new election request broadcast
+                    // The cluster coordinator should handle this
+                }
+            }
+            
+            Ok(false)
+        }
+
+        /// Become leader after winning election with enhanced leadership establishment
         pub async fn become_leader(&mut self) -> ConsensusResult<()> {
             if !matches!(self.state, ConsensusState::Candidate) {
                 return Err(ConsensusError::Generic(
@@ -580,15 +910,39 @@ pub mod raft {
                 ));
             }
 
-            tracing::info!("Node {} became leader for term {}", self.node_id, self.current_term);
+            let election_duration = self.election_state.election_start
+                .map(|start| start.elapsed())
+                .unwrap_or_default();
+
+            tracing::info!("Node {} became leader for term {} in {}μs", 
+                self.node_id, self.current_term, election_duration.as_micros());
 
             self.state = ConsensusState::Leader;
             self.current_leader = Some(self.node_id);
             self.metrics.elections_won += 1;
 
-            if let Some(election_start) = self.election_start.take() {
-                self.metrics.last_election_duration = Some(election_start.elapsed());
+            // Record election timing metrics
+            self.metrics.last_election_duration = Some(election_duration);
+            if self.metrics.fastest_election_duration.is_none() || 
+               Some(election_duration) < self.metrics.fastest_election_duration {
+                self.metrics.fastest_election_duration = Some(election_duration);
             }
+
+            // Update average election duration (simple moving average)
+            let current_avg_nanos = self.metrics.avg_election_duration.as_nanos() as f64;
+            let new_duration_nanos = election_duration.as_nanos() as f64;
+            let elections_count = self.metrics.elections_won as f64;
+            let new_avg_nanos = (current_avg_nanos * (elections_count - 1.0) + new_duration_nanos) / elections_count;
+            self.metrics.avg_election_duration = Duration::from_nanos(new_avg_nanos as u64);
+
+            // Check if this was a fast election
+            if election_duration.as_micros() < self.config.fast_election_threshold_us as u128 {
+                self.metrics.fast_elections_completed += 1;
+                tracing::info!("Fast election completed in {}μs", election_duration.as_micros());
+            }
+
+            // Set leadership lease
+            self.leadership_lease = Some(Instant::now() + self.config.leadership_lease_duration);
 
             // Initialize leader state - set next_index to last log index + 1 for all followers
             let last_log_index = self.log.len() as LogIndex;
@@ -597,11 +951,19 @@ pub mod raft {
                 self.match_index.insert(peer_id, 0);
             }
 
-            // Send empty append entries (heartbeat) to establish leadership
+            // Reset election state
+            self.election_state = ElectionState::default();
+
+            tracing::info!("Leadership established for node {} in term {} (total elections: {}, avg duration: {}μs)", 
+                self.node_id, 
+                self.current_term, 
+                self.metrics.elections_won,
+                self.metrics.avg_election_duration.as_micros());
+
             Ok(())
         }
 
-        /// Become follower
+        /// Become follower with enhanced state cleanup
         pub fn become_follower(&mut self, term: Term) -> ConsensusResult<()> {
             if term < self.current_term {
                 return Err(ConsensusError::TermMismatch {
@@ -615,8 +977,11 @@ pub mod raft {
             self.current_term = term;
             self.state = ConsensusState::Follower;
             self.voted_for = None;
-            self.election_start = None;
             self.vote_count = 0;
+            self.leadership_lease = None;
+
+            // Reset election state
+            self.election_state = ElectionState::default();
 
             if state_changed {
                 tracing::info!("Node {} became follower for term {}", self.node_id, self.current_term);
@@ -627,8 +992,10 @@ pub mod raft {
 
         /// Handle append entries request (log replication and heartbeat)
         pub async fn handle_append_entries(&mut self, request: AppendEntriesRequest) -> ConsensusResult<AppendEntriesResponse> {
-            tracing::trace!("Node {} handling append entries from {} (term={}, entries={})", 
-                self.node_id, request.leader_id, request.term, request.entries.len());
+            let processing_start = Instant::now();
+            
+            tracing::trace!("Node {} handling append entries from {} (term={}, entries={}, lease={:?})", 
+                self.node_id, request.leader_id, request.term, request.entries.len(), request.leadership_lease_ms);
 
             // If term is outdated, reject
             if request.term < self.current_term {
@@ -639,6 +1006,7 @@ pub mod raft {
                     conflict_index: None,
                     conflict_term: None,
                     request_id: request.request_id,
+                    processing_latency_us: Some(processing_start.elapsed().as_micros() as u64),
                 });
             }
 
@@ -647,6 +1015,13 @@ pub mod raft {
                 self.become_follower(request.term)?;
                 self.current_leader = Some(request.leader_id);
                 self.last_heartbeat = Some(Instant::now());
+                
+                // Process leadership lease if provided
+                if let Some(lease_ms) = request.leadership_lease_ms {
+                    let lease_duration = Duration::from_millis(lease_ms);
+                    // We don't store leadership lease for followers, but acknowledge it
+                    tracing::trace!("Acknowledged leadership lease of {}ms from {}", lease_ms, request.leader_id);
+                }
             }
 
             // Check log consistency
@@ -661,6 +1036,7 @@ pub mod raft {
                     conflict_index: Some(conflict_index),
                     conflict_term,
                     request_id: request.request_id,
+                    processing_latency_us: Some(processing_start.elapsed().as_micros() as u64),
                 });
             }
 
@@ -683,6 +1059,7 @@ pub mod raft {
                 conflict_index: None,
                 conflict_term: None,
                 request_id: request.request_id,
+                processing_latency_us: Some(processing_start.elapsed().as_micros() as u64),
             })
         }
 
@@ -712,6 +1089,11 @@ pub mod raft {
                 .cloned()
                 .collect();
 
+            // Include leadership lease information
+            let leadership_lease_ms = self.leadership_lease
+                .and_then(|lease| lease.checked_duration_since(Instant::now()).ok())
+                .map(|duration| duration.as_millis() as u64);
+
             Ok(AppendEntriesRequest {
                 term: self.current_term,
                 leader_id: self.node_id,
@@ -720,6 +1102,7 @@ pub mod raft {
                 entries,
                 leader_commit: self.commit_index,
                 request_id: self.generate_request_id(),
+                leadership_lease_ms,
             })
         }
 
@@ -731,6 +1114,15 @@ pub mod raft {
         ) -> ConsensusResult<()> {
             if !self.is_leader() {
                 return Ok(());
+            }
+
+            // Track processing latency if provided
+            if let Some(latency_us) = response.processing_latency_us {
+                let latency = Duration::from_micros(latency_us);
+                if self.metrics.network_latency_samples.len() > 100 {
+                    self.metrics.network_latency_samples.remove(0);
+                }
+                self.metrics.network_latency_samples.push(latency);
             }
 
             // If we receive a higher term, step down
@@ -762,6 +1154,16 @@ pub mod raft {
                 return Err(ConsensusError::NotLeader { leader: self.current_leader });
             }
 
+            // Check leadership lease validity
+            if let Some(lease) = self.leadership_lease {
+                if Instant::now() > lease {
+                    tracing::warn!("Leadership lease expired for node {}, stepping down", self.node_id);
+                    let current_term = self.current_term;
+                    self.become_follower(current_term)?;
+                    return Err(ConsensusError::NotLeader { leader: None });
+                }
+            }
+
             let index = (self.log.len() + 1) as LogIndex;
             let entry = LogEntry::new(self.current_term, index, command);
             
@@ -790,6 +1192,36 @@ pub mod raft {
                     });
                 }
             }
+            Ok(())
+        }
+
+        /// Check if leadership lease is still valid
+        pub fn is_leadership_lease_valid(&self) -> bool {
+            if let Some(lease) = self.leadership_lease {
+                Instant::now() <= lease
+            } else {
+                false
+            }
+        }
+
+        /// Force leadership transfer to another node
+        pub async fn initiate_leadership_transfer(&mut self, target_node: Option<NodeId>) -> ConsensusResult<()> {
+            if !self.is_leader() {
+                return Err(ConsensusError::NotLeader { leader: self.current_leader });
+            }
+
+            tracing::info!("Node {} initiating leadership transfer to {:?}", self.node_id, target_node);
+
+            // In a complete implementation, this would:
+            // 1. Stop accepting new client requests
+            // 2. Ensure target node is caught up on log (if specified)
+            // 3. Send TimeoutNow message to trigger immediate election
+            // 4. Step down as leader
+
+            // For now, just step down and let normal election process handle it
+            let current_term = self.current_term;
+            self.become_follower(current_term)?;
+
             Ok(())
         }
 
@@ -930,9 +1362,7 @@ pub mod raft {
 
         /// Generate unique request ID for pipeline tracking
         fn generate_request_id(&self) -> u64 {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static COUNTER: AtomicU64 = AtomicU64::new(1);
-            COUNTER.fetch_add(1, Ordering::Relaxed)
+            self.request_counter.fetch_add(1, Ordering::Relaxed)
         }
 
         /// Get peer node IDs (placeholder - should be integrated with membership)
@@ -943,16 +1373,18 @@ pub mod raft {
         }
     }
 
-    /// Raft state machine that coordinates consensus operations
+    /// Raft state machine that coordinates consensus operations with enhanced performance monitoring
     pub struct RaftStateMachine {
         /// Raft node
         pub node: RwLock<RaftNode>,
         /// Shutdown signal
         pub shutdown: tokio::sync::watch::Receiver<bool>,
+        /// Performance monitoring interval
+        monitoring_interval: Duration,
     }
 
     impl RaftStateMachine {
-        /// Create new Raft state machine
+        /// Create new Raft state machine with performance monitoring
         pub fn new(node_id: NodeId, cluster_size: usize, config: RaftConfig) -> (Self, tokio::sync::watch::Sender<bool>) {
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let node = RaftNode::new(node_id, cluster_size, config);
@@ -961,21 +1393,26 @@ pub mod raft {
                 Self {
                     node: RwLock::new(node),
                     shutdown: shutdown_rx,
+                    monitoring_interval: Duration::from_secs(30), // Monitor every 30 seconds
                 },
                 shutdown_tx,
             )
         }
 
-        /// Start the Raft consensus loop
+        /// Start the Raft consensus loop with enhanced monitoring
         pub async fn run(&mut self) -> ConsensusResult<()> {
             let mut heartbeat_interval = tokio::time::interval(
                 self.node.read().await.config.heartbeat_interval
             );
+            let mut monitoring_interval = tokio::time::interval(self.monitoring_interval);
 
             loop {
                 tokio::select! {
                     _ = heartbeat_interval.tick() => {
                         self.heartbeat_tick().await?;
+                    }
+                    _ = monitoring_interval.tick() => {
+                        self.performance_monitoring_tick().await?;
                     }
                     _ = self.shutdown.changed() => {
                         if *self.shutdown.borrow() {
@@ -989,19 +1426,26 @@ pub mod raft {
             Ok(())
         }
 
-        /// Handle heartbeat tick
+        /// Handle heartbeat tick with election timeout detection
         async fn heartbeat_tick(&self) -> ConsensusResult<()> {
             let mut node = self.node.write().await;
             
             match node.state() {
                 ConsensusState::Leader => {
-                    // Send heartbeats to all followers
-                    tracing::trace!("Leader {} sending heartbeats", node.node_id());
+                    // Check leadership lease validity
+                    if !node.is_leadership_lease_valid() {
+                        tracing::warn!("Leadership lease expired for node {}, stepping down", node.node_id());
+                        let current_term = node.current_term();
+                        node.become_follower(current_term)?;
+                    } else {
+                        tracing::trace!("Leader {} sending heartbeats", node.node_id());
+                    }
                 }
                 ConsensusState::Follower | ConsensusState::Candidate => {
                     // Check for election timeout
                     if node.is_election_timeout() {
                         tracing::debug!("Node {} detected election timeout, starting election", node.node_id());
+                        node.metrics.election_timeouts += 1;
                         let _vote_request = node.start_election().await?;
                         // In a real implementation, this would broadcast the vote request
                     }
@@ -1010,6 +1454,78 @@ pub mod raft {
 
             Ok(())
         }
+
+        /// Performance monitoring tick
+        async fn performance_monitoring_tick(&self) -> ConsensusResult<()> {
+            let node = self.node.read().await;
+            let metrics = &node.metrics;
+
+            tracing::info!(
+                "Raft performance metrics for node {}: elections={} (won={}), fastest={}μs, avg={}μs, fast_elections={}, timeouts={}, split_votes={}",
+                node.node_id(),
+                metrics.elections_started,
+                metrics.elections_won,
+                metrics.fastest_election_duration.map_or(0, |d| d.as_micros()),
+                metrics.avg_election_duration.as_micros(),
+                metrics.fast_elections_completed,
+                metrics.election_timeouts,
+                metrics.split_votes
+            );
+
+            // Log network latency statistics
+            if !metrics.network_latency_samples.is_empty() {
+                let avg_latency_us = metrics.network_latency_samples.iter()
+                    .map(|d| d.as_micros())
+                    .sum::<u128>() / metrics.network_latency_samples.len() as u128;
+                
+                tracing::debug!("Average network latency: {}μs (samples: {})", 
+                    avg_latency_us, metrics.network_latency_samples.len());
+            }
+
+            Ok(())
+        }
+
+        /// Get current election performance summary
+        pub async fn election_performance_summary(&self) -> ElectionPerformanceSummary {
+            let node = self.node.read().await;
+            let metrics = &node.metrics;
+
+            ElectionPerformanceSummary {
+                total_elections: metrics.elections_started,
+                successful_elections: metrics.elections_won,
+                fast_elections: metrics.fast_elections_completed,
+                average_duration: metrics.avg_election_duration,
+                fastest_duration: metrics.fastest_election_duration,
+                election_timeouts: metrics.election_timeouts,
+                split_votes: metrics.split_votes,
+                success_rate: if metrics.elections_started > 0 {
+                    (metrics.elections_won as f64) / (metrics.elections_started as f64)
+                } else {
+                    0.0
+                },
+            }
+        }
+    }
+
+    /// Election performance summary for monitoring
+    #[derive(Debug, Clone)]
+    pub struct ElectionPerformanceSummary {
+        /// Total elections attempted
+        pub total_elections: u64,
+        /// Successful elections (became leader)
+        pub successful_elections: u64,
+        /// Fast elections completed
+        pub fast_elections: u64,
+        /// Average election duration
+        pub average_duration: Duration,
+        /// Fastest election duration achieved
+        pub fastest_duration: Option<Duration>,
+        /// Number of election timeouts
+        pub election_timeouts: u64,
+        /// Number of split vote scenarios
+        pub split_votes: u64,
+        /// Election success rate (0.0 to 1.0)
+        pub success_rate: f64,
     }
 
     #[cfg(test)]
@@ -1042,8 +1558,18 @@ pub mod raft {
         }
 
         #[tokio::test]
+        async fn test_pre_vote_enabled() {
+            let mut node = create_test_node(3);
+            assert!(node.config.pre_vote_enabled);
+            
+            // First call should start pre-vote
+            let pre_vote_request = node.start_election().await.unwrap();
+            assert!(pre_vote_request.pre_vote);
+            assert_eq!(node.state(), ConsensusState::Follower); // Still follower during pre-vote
+        }
+
+        #[tokio::test]
         async fn test_vote_request_handling() {
-            let _node_id = NodeId::generate();
             let candidate_id = NodeId::generate();
             let mut node = create_test_node(3);
 
@@ -1053,6 +1579,8 @@ pub mod raft {
                 last_log_index: 0,
                 last_log_term: Term::default(),
                 pre_vote: false,
+                request_timestamp: 0,
+                fast_election: false,
             };
 
             let response = node.handle_vote_request(request).await.unwrap();
@@ -1077,10 +1605,33 @@ pub mod raft {
             
             assert_eq!(node.state(), ConsensusState::Leader);
             assert!(node.is_leader());
+            assert!(node.leadership_lease.is_some());
         }
 
         #[tokio::test]
-        async fn test_append_entries_heartbeat() {
+        async fn test_fast_election_detection() {
+            let mut node = create_test_node(3);
+            node.election_state.fast_election_eligible = true;
+            
+            // Should be eligible for fast election with proper conditions
+            assert!(node.election_state.can_fast_elect(&node.fast_config.clone(), 3));
+        }
+
+        #[tokio::test]
+        async fn test_leadership_lease() {
+            let mut node = create_test_node(3);
+            
+            // Start election and become leader
+            let _vote_request = node.start_election().await.unwrap();
+            node.vote_count = 2;
+            node.become_leader().await.unwrap();
+            
+            // Leadership lease should be valid initially
+            assert!(node.is_leadership_lease_valid());
+        }
+
+        #[tokio::test]
+        async fn test_append_entries_heartbeat_with_lease() {
             let leader_id = NodeId::generate();
             let mut node = create_test_node(3);
 
@@ -1092,6 +1643,7 @@ pub mod raft {
                 entries: vec![],
                 leader_commit: 0,
                 request_id: 1,
+                leadership_lease_ms: Some(50), // 50ms lease
             };
 
             let response = node.handle_append_entries(request).await.unwrap();
@@ -1100,6 +1652,7 @@ pub mod raft {
             assert_eq!(response.term, Term::new(1));
             assert_eq!(node.state(), ConsensusState::Follower);
             assert_eq!(node.current_leader(), Some(leader_id));
+            assert!(response.processing_latency_us.is_some());
         }
 
         #[tokio::test]
@@ -1121,16 +1674,33 @@ pub mod raft {
         }
 
         #[test]
-        fn test_election_timeout_generation() {
+        fn test_adaptive_election_timeout() {
             let node = create_test_node(3);
-            let timeout1 = node.generate_election_timeout();
-            let timeout2 = node.generate_election_timeout();
+            let timeout1 = node.generate_adaptive_election_timeout();
+            let timeout2 = node.generate_adaptive_election_timeout();
             
-            // Timeouts should be within configured range
-            assert!(timeout1 >= node.config.election_timeout_min);
-            assert!(timeout1 <= node.config.election_timeout_max);
-            assert!(timeout2 >= node.config.election_timeout_min);
-            assert!(timeout2 <= node.config.election_timeout_max);
+            // Timeouts should be within configured range (adjusted for small cluster)
+            let expected_min = Duration::from_millis(33); // 2/3 of 50ms for small cluster
+            let expected_max = Duration::from_millis(67); // 2/3 of 100ms for small cluster
+            
+            assert!(timeout1 >= expected_min);
+            assert!(timeout1 <= Duration::from_millis(100)); // Upper bound
+            assert!(timeout2 >= expected_min);
+            assert!(timeout2 <= Duration::from_millis(100)); // Upper bound
+        }
+
+        #[test]
+        fn test_election_state() {
+            let mut election_state = ElectionState::default();
+            
+            election_state.reset_for_pre_vote();
+            assert_eq!(election_state.pre_votes_received, 0);
+            assert!(election_state.pre_vote_start.is_some());
+            
+            election_state.reset_for_election();
+            assert_eq!(election_state.votes_received, 0);
+            assert!(election_state.election_start.is_some());
+            assert_eq!(election_state.election_attempts, 1);
         }
 
         #[test]
@@ -1157,6 +1727,42 @@ pub mod raft {
             let node = state_machine.node.read().await;
             assert_eq!(node.node_id(), node_id);
             assert_eq!(node.state(), ConsensusState::Follower);
+        }
+
+        #[tokio::test]
+        async fn test_election_performance_summary() {
+            let node_id = NodeId::generate();
+            let config = RaftConfig::default();
+            let (state_machine, _shutdown) = RaftStateMachine::new(node_id, 3, config);
+            
+            let summary = state_machine.election_performance_summary().await;
+            assert_eq!(summary.total_elections, 0);
+            assert_eq!(summary.success_rate, 0.0);
+        }
+
+        #[test]
+        fn test_fast_election_config() {
+            let fast_config = FastElectionConfig::default();
+            assert!(fast_config.enable_single_round);
+            assert_eq!(fast_config.stability_threshold, Duration::from_millis(100));
+            assert_eq!(fast_config.max_network_latency, Duration::from_micros(200));
+        }
+
+        #[tokio::test]
+        async fn test_leadership_transfer() {
+            let mut node = create_test_node(3);
+            
+            // Become leader
+            node.start_election().await.unwrap();
+            node.vote_count = 2;
+            node.become_leader().await.unwrap();
+            
+            // Initiate leadership transfer
+            let target = Some(NodeId::generate());
+            node.initiate_leadership_transfer(target).await.unwrap();
+            
+            assert_eq!(node.state(), ConsensusState::Follower);
+            assert!(node.leadership_lease.is_none());
         }
     }
 }

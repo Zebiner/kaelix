@@ -54,6 +54,7 @@ zeroize = "1.8.1"
 ring = "0.17"
 subtle = "2.6"
 kaelix-core = { path = "kaelix-core" }
+kaelix-storage = { path = "kaelix-storage" }
 
 
 # High-performance data structures - SECURITY UPDATED

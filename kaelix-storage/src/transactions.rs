@@ -38,6 +38,22 @@ impl Default for TransactionConfig {
     }
 }
 
+impl TransactionConfig {
+    /// Validate the transaction configuration
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_duration.is_zero() {
+            return Err("max_duration must be greater than zero".to_string());
+        }
+
+        // Validate that the log directory is a valid path
+        if self.log_dir.as_os_str().is_empty() {
+            return Err("log_dir cannot be empty".to_string());
+        }
+
+        Ok(())
+    }
+}
+
 /// Transaction isolation levels
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum IsolationLevel {
@@ -84,7 +100,7 @@ pub enum TransactionError {
 }
 
 /// Transaction statistics
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransactionStats {
     /// Total transactions started
     pub transactions_started: u64,
@@ -285,5 +301,15 @@ mod tests {
         let result = transaction.abort().await;
         assert!(result.is_ok());
         assert!(matches!(transaction.state, TransactionState::Aborted));
+    }
+
+    #[test]
+    fn test_transaction_config_validation() {
+        let config = TransactionConfig::default();
+        assert!(config.validate().is_ok());
+
+        let mut invalid_config = config.clone();
+        invalid_config.max_duration = Duration::ZERO;
+        assert!(invalid_config.validate().is_err());
     }
 }

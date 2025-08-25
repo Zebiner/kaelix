@@ -4,17 +4,17 @@
 
 use crate::{
     error::{Error, Result},
-    ClusterNodeId,
+    types::NodeId,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, net::SocketAddr, path::PathBuf};
+use std::{collections::HashSet, net::SocketAddr, path::PathBuf, time::Duration};
 use validator::Validate;
 
 /// Comprehensive cluster configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct ClusterConfig {
     /// Unique identifier for this node
-    pub node_id: ClusterNodeId,
+    pub node_id: NodeId,
 
     /// Address to bind for incoming cluster connections
     pub bind_address: SocketAddr,
@@ -40,6 +40,9 @@ pub struct ClusterConfig {
 
     /// Performance tuning configuration
     pub performance: PerformanceConfig,
+    
+    /// High availability configuration
+    pub ha: HaConfigCluster,
 }
 
 impl ClusterConfig {
@@ -51,7 +54,7 @@ impl ClusterConfig {
 
     /// Get the node ID
     #[must_use]
-    pub const fn node_id(&self) -> ClusterNodeId {
+    pub const fn node_id(&self) -> NodeId {
         self.node_id
     }
 
@@ -90,6 +93,111 @@ impl ClusterConfig {
         }
 
         Ok(())
+    }
+}
+
+/// Node-specific configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct NodeConfig {
+    /// Node role in the cluster
+    pub role: NodeRole,
+    /// Node capabilities
+    pub capabilities: Vec<String>,
+}
+
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self {
+            role: NodeRole::Member,
+            capabilities: vec!["storage".to_string(), "compute".to_string()],
+        }
+    }
+}
+
+/// Node role in the cluster
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeRole {
+    /// Bootstrap node (initial cluster formation)
+    Bootstrap,
+    /// Regular cluster member
+    Member,
+    /// Observer node (read-only)
+    Observer,
+}
+
+/// Network configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct NetworkConfig {
+    /// Network interface to bind to
+    pub interface: String,
+    /// Network timeout for operations
+    #[validate(range(min = 100, max = 30000))]
+    pub timeout_ms: u64,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            interface: "0.0.0.0".to_string(),
+            timeout_ms: 5000,
+        }
+    }
+}
+
+/// High availability configuration (for cluster config)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HaConfigCluster {
+    /// Enable automatic failover
+    pub enable_auto_failover: bool,
+    /// Failover timeout
+    pub failover_timeout_ms: u64,
+    /// Enable health monitoring
+    pub enable_health_monitoring: bool,
+}
+
+impl Default for HaConfigCluster {
+    fn default() -> Self {
+        Self {
+            enable_auto_failover: true,
+            failover_timeout_ms: 30000,
+            enable_health_monitoring: true,
+        }
+    }
+}
+
+/// High availability configuration  
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HaConfig {
+    /// Enable automatic failover
+    pub enable_auto_failover: bool,
+    /// Failover timeout
+    pub failover_timeout_ms: u64,
+}
+
+impl Default for HaConfig {
+    fn default() -> Self {
+        Self {
+            enable_auto_failover: true,
+            failover_timeout_ms: 30000,
+        }
+    }
+}
+
+/// Telemetry configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// Enable metrics collection
+    pub enable_metrics: bool,
+    /// Metrics endpoint
+    pub metrics_endpoint: String,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enable_metrics: true,
+            metrics_endpoint: "127.0.0.1:9090".to_string(),
+        }
     }
 }
 
@@ -174,6 +282,18 @@ pub struct ConsensusConfig {
 
     /// Pipelining optimization
     pub enable_pipelining: bool,
+
+    /// Enable consensus (needed for lib.rs)
+    pub enabled: bool,
+
+    /// Cluster size for consensus
+    pub cluster_size: usize,
+
+    /// Consensus algorithm name for matching
+    pub algorithm_name: String,
+
+    /// Raft-specific configuration
+    pub raft: RaftConfig,
 }
 
 impl Default for ConsensusConfig {
@@ -187,6 +307,28 @@ impl Default for ConsensusConfig {
             snapshot_threshold: 100000,
             enable_pre_vote: true,
             enable_pipelining: true,
+            enabled: true,
+            cluster_size: 3,
+            algorithm_name: "raft".to_string(),
+            raft: RaftConfig::default(),
+        }
+    }
+}
+
+/// Raft-specific configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaftConfig {
+    /// Enable leadership lease
+    pub enable_leadership_lease: bool,
+    /// Leadership lease timeout
+    pub leadership_lease_timeout_ms: u64,
+}
+
+impl Default for RaftConfig {
+    fn default() -> Self {
+        Self {
+            enable_leadership_lease: true,
+            leadership_lease_timeout_ms: 5000,
         }
     }
 }
@@ -301,7 +443,7 @@ pub struct SecurityConfig {
     pub auth_token: Option<String>,
 
     /// Trusted node IDs (empty means trust all)
-    pub trusted_nodes: HashSet<ClusterNodeId>,
+    pub trusted_nodes: HashSet<NodeId>,
 }
 
 impl Default for SecurityConfig {
@@ -406,7 +548,7 @@ pub enum Allocator {
 /// Configuration builder for fluent API
 #[derive(Debug, Default)]
 pub struct ClusterConfigBuilder {
-    node_id: Option<ClusterNodeId>,
+    node_id: Option<NodeId>,
     bind_address: Option<SocketAddr>,
     cluster_name: Option<String>,
     seed_nodes: Vec<SocketAddr>,
@@ -415,12 +557,13 @@ pub struct ClusterConfigBuilder {
     communication: Option<CommunicationConfig>,
     security: Option<SecurityConfig>,
     performance: Option<PerformanceConfig>,
+    ha: Option<HaConfigCluster>,
 }
 
 impl ClusterConfigBuilder {
     /// Set the node ID
     #[must_use]
-    pub fn node_id(mut self, node_id: ClusterNodeId) -> Self {
+    pub fn node_id(mut self, node_id: NodeId) -> Self {
         self.node_id = Some(node_id);
         self
     }
@@ -488,6 +631,13 @@ impl ClusterConfigBuilder {
         self
     }
 
+    /// Set HA configuration
+    #[must_use]
+    pub fn ha(mut self, config: HaConfigCluster) -> Self {
+        self.ha = Some(config);
+        self
+    }
+
     /// Build the configuration
     ///
     /// # Errors
@@ -509,6 +659,7 @@ impl ClusterConfigBuilder {
             communication: self.communication.unwrap_or_default(),
             security: self.security.unwrap_or_default(),
             performance: self.performance.unwrap_or_default(),
+            ha: self.ha.unwrap_or_default(),
         };
 
         config.validate_config()?;
@@ -523,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_config_builder() -> Result<()> {
-        let node_id = ClusterNodeId::generate();
+        let node_id = NodeId::generate();
         let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
 
         let config = ClusterConfig::builder()
@@ -543,7 +694,7 @@ mod tests {
 
     #[test]
     fn test_config_validation() {
-        let node_id = ClusterNodeId::generate();
+        let node_id = NodeId::generate();
         let invalid_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
 
         let result = ClusterConfig::builder()

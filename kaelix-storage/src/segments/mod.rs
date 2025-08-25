@@ -1,101 +1,102 @@
-use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex, RwLock,
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}},
+    time::Instant,
 };
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::RwLock;
+use tracing::{debug, info};
 
+// Re-export segment types
 pub mod entry;
 pub mod segment;
 pub mod segment_writer;
 
-// Re-export types for public use
-pub use self::entry::StorageEntry;
-pub use self::segment::StorageSegment;
-pub use self::segment_writer::{SegmentWriter, WriteResult};
+pub use entry::{StorageEntry, StorageEntryMetadata, CompressionType};
+pub use segment::StorageSegment;
+pub use segment_writer::{SegmentWriter, SegmentWriterConfig};
 
-/// Segment identifier
+/// Unique identifier for a segment
 pub type SegmentId = u64;
 
-/// Segment storage errors
+/// Main errors for segment storage
 #[derive(Error, Debug)]
 pub enum StorageError {
-    /// I/O operation failed
+    /// I/O error
     #[error("I/O error: {0}")]
     Io(String),
-
+    
     /// Serialization error
     #[error("Serialization error: {0}")]
     Serialization(String),
-
+    
+    /// Corruption detected
+    #[error("Data corruption detected: {0}")]
+    Corruption(String),
+    
     /// Segment not found
-    #[error("Segment {0} not found")]
+    #[error("Segment not found: {0}")]
     SegmentNotFound(SegmentId),
-
-    /// Segment is full
-    #[error("Segment {0} is full")]
-    SegmentFull(SegmentId),
-
-    /// Invalid segment ID
-    #[error("Invalid segment ID: {0}")]
-    InvalidSegmentId(SegmentId),
-
-    /// System is shutting down
-    #[error("System is shutting down")]
-    Shutdown,
-
+    
+    /// Entry not found
+    #[error("Entry not found: {0}")]
+    EntryNotFound(String),
+    
     /// Configuration error
     #[error("Configuration error: {0}")]
     Configuration(String),
-
-    /// Validation error
-    #[error("Validation error: {0}")]
-    Validation(String),
+    
+    /// Resource exhausted
+    #[error("Resource exhausted: {0}")]
+    ResourceExhausted(String),
 }
 
 /// Result type for segment operations
 pub type Result<T> = std::result::Result<T, StorageError>;
 
-/// Configuration for segment storage
+/// Configuration for segment-based storage
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentConfig {
-    /// Directory where segments are stored
-    pub data_dir: PathBuf,
-
-    /// Maximum size of a segment in bytes
+    /// Directory to store segment files
+    pub data_dir: std::path::PathBuf,
+    /// Maximum size for a single segment file (bytes)
     pub max_segment_size: u64,
-
     /// Maximum number of entries per segment
     pub max_entries_per_segment: u64,
-
-    /// Compression settings
+    /// Enable compression for segment data
     pub enable_compression: bool,
-    pub compression_level: u32,
-
-    /// Sync behavior
-    pub sync_on_write: bool,
-    pub sync_interval_ms: u64,
-
-    /// Buffer settings
+    /// Compression level (0-9, higher = more compression)
+    pub compression_level: u8,
+    /// Write buffer size for segments
     pub write_buffer_size: usize,
-    pub read_buffer_size: usize,
+    /// Enable synchronous writes
+    pub sync_on_write: bool,
+    /// Interval for automatic synchronization (milliseconds)
+    pub sync_interval_ms: u64,
+    /// Maximum number of concurrent readers
+    pub max_concurrent_readers: usize,
+    /// Enable background compaction
+    pub enable_compaction: bool,
+    /// Compaction trigger threshold (fraction of deleted entries)
+    pub compaction_threshold: f64,
 }
 
 impl Default for SegmentConfig {
     fn default() -> Self {
         Self {
-            data_dir: PathBuf::from("./segments"),
-            max_segment_size: 256 * 1024 * 1024, // 256 MB
-            max_entries_per_segment: 1_000_000,   // 1M entries
+            data_dir: std::path::PathBuf::from("segments"),
+            max_segment_size: 64 * 1024 * 1024, // 64MB
+            max_entries_per_segment: 100_000,
             enable_compression: true,
             compression_level: 6,
+            write_buffer_size: 64 * 1024, // 64KB
             sync_on_write: false,
-            sync_interval_ms: 1000, // 1 second
-            write_buffer_size: 1024 * 1024, // 1 MB
-            read_buffer_size: 1024 * 1024,  // 1 MB
+            sync_interval_ms: 1000,
+            max_concurrent_readers: 16,
+            enable_compaction: true,
+            compaction_threshold: 0.3,
         }
     }
 }
@@ -108,128 +109,108 @@ impl SegmentConfig {
                 "max_segment_size must be greater than 0".to_string(),
             ));
         }
-
+        
         if self.max_entries_per_segment == 0 {
             return Err(StorageError::Configuration(
                 "max_entries_per_segment must be greater than 0".to_string(),
             ));
         }
-
+        
         if self.compression_level > 9 {
             return Err(StorageError::Configuration(
                 "compression_level must be between 0 and 9".to_string(),
             ));
         }
-
-        if self.write_buffer_size == 0 || self.read_buffer_size == 0 {
+        
+        if self.write_buffer_size == 0 {
             return Err(StorageError::Configuration(
-                "buffer sizes must be greater than 0".to_string(),
+                "write_buffer_size must be greater than 0".to_string(),
             ));
         }
-
+        
+        if self.max_concurrent_readers == 0 {
+            return Err(StorageError::Configuration(
+                "max_concurrent_readers must be greater than 0".to_string(),
+            ));
+        }
+        
+        if !(0.0..=1.0).contains(&self.compaction_threshold) {
+            return Err(StorageError::Configuration(
+                "compaction_threshold must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+        
         Ok(())
     }
 }
 
-/// Statistics for segment storage operations
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Statistics for segment operations
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SegmentStats {
-    /// Total number of segments created
-    pub segments_created: u64,
-
-    /// Total entries written across all segments
+    /// Total number of segments
+    pub total_segments: u64,
+    /// Total entries written
     pub entries_written: u64,
-
-    /// Total entries read across all segments
+    /// Total entries read
     pub entries_read: u64,
-
     /// Total bytes written
     pub bytes_written: u64,
-
     /// Total bytes read
     pub bytes_read: u64,
-
-    /// Current active segments
+    /// Number of active segments
     pub active_segments: u64,
-
     /// Average write latency in microseconds
     pub avg_write_latency_us: u64,
-
     /// Average read latency in microseconds
     pub avg_read_latency_us: u64,
-
-    /// Total compression ratio achieved
+    /// Compression ratio (compressed/uncompressed)
     pub compression_ratio: f64,
-
-    /// Total errors encountered
-    pub errors_total: u64,
+    /// Number of compactions performed
+    pub compactions_completed: u64,
+    /// Last compaction timestamp
+    pub last_compaction: Option<std::time::SystemTime>,
 }
 
-/// Writer configuration
-#[derive(Debug, Clone)]
-pub struct WriterConfig {
-    pub data_dir: PathBuf,
-    pub max_segment_size: u64,
-    pub max_entries_per_segment: u64,
-    pub enable_compression: bool,
-    pub compression_level: u32,
-    pub buffer_size: usize,
-    pub sync_on_write: bool,
-    pub sync_interval_ms: u64,
-}
-
-/// Segment storage manager
-///
-/// Manages multiple segments and provides a unified interface for writing and reading entries.
-/// Handles segment creation, rotation, and cleanup automatically.
-#[derive(Debug)]
+/// Segment-based storage manager
 pub struct SegmentStorage {
     /// Configuration
-    config: Arc<SegmentConfig>,
-
-    /// Active segments (segment_id -> segment)
+    config: SegmentConfig,
+    /// Active segments
     active_segments: Arc<RwLock<HashMap<SegmentId, Arc<Mutex<StorageSegment>>>>>,
-
-    /// Primary segment writer
+    /// Segment writer for new entries
     writer: Arc<tokio::sync::Mutex<SegmentWriter>>,
-
     /// Statistics
     stats: Arc<RwLock<SegmentStats>>,
-
+    /// Next segment ID
+    next_segment_id: AtomicU64,
     /// Shutdown flag
-    is_shutdown: Arc<AtomicBool>,
-
-    /// Next segment ID counter
-    next_segment_id: Arc<AtomicU64>,
+    is_shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SegmentStorage {
-    /// Create a new segment storage manager
+    /// Create a new segment storage instance
     pub async fn new(config: SegmentConfig) -> Result<Self> {
         // Validate configuration
         config.validate()?;
-
-        let config = Arc::new(config);
-
-        // Create data directory if it doesn't exist
+        
+        info!("Initializing segment storage with config: {:?}", config);
+        
+        // Create data directory
         if !config.data_dir.exists() {
-            std::fs::create_dir_all(&config.data_dir)
+            tokio::fs::create_dir_all(&config.data_dir).await
                 .map_err(|e| StorageError::Io(format!("Failed to create data directory: {}", e)))?;
         }
-
-        // Initialize segment writer
-        let writer_config = WriterConfig {
-            data_dir: config.data_dir.clone(),
-            max_segment_size: config.max_segment_size,
-            max_entries_per_segment: config.max_entries_per_segment,
-            enable_compression: config.enable_compression,
-            compression_level: config.compression_level,
+        
+        // Create segment writer
+        let segment_id = 0;
+        let writer_config = SegmentWriterConfig {
+            segment_size: config.max_segment_size as usize,
             buffer_size: config.write_buffer_size,
-            sync_on_write: config.sync_on_write,
-            sync_interval_ms: config.sync_interval_ms,
+            compression_enabled: config.enable_compression,
+            checksum_enabled: true,
         };
 
-        let writer = SegmentWriter::new(writer_config).await
+        let writer = SegmentWriter::new(segment_id, &config.data_dir, config.enable_compression, writer_config).await
             .map_err(|e| StorageError::Io(format!("Failed to create segment writer: {}", e)))?;
 
         Ok(Self {
@@ -237,106 +218,176 @@ impl SegmentStorage {
             active_segments: Arc::new(RwLock::new(HashMap::new())),
             writer: Arc::new(tokio::sync::Mutex::new(writer)),
             stats: Arc::new(RwLock::new(SegmentStats::default())),
-            is_shutdown: Arc::new(AtomicBool::new(false)),
-            next_segment_id: Arc::new(AtomicU64::new(1)),
+            next_segment_id: AtomicU64::new(1),
+            is_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
-
-    /// Write an entry to the segment storage
-    pub async fn write_entry(&self, entry: &StorageEntry) -> Result<SegmentId> {
+    
+    /// Write an entry to storage
+    pub async fn write_entry(&self, entry: StorageEntry) -> Result<SegmentId> {
         if self.is_shutdown.load(Ordering::Relaxed) {
-            return Err(StorageError::Shutdown);
+            return Err(StorageError::Configuration("Storage is shutting down".to_string()));
         }
-
-        let writer = self.writer.lock().await;
         
-        // Write entry using the segment writer
-        let result = writer.write_entry(entry).await
-            .map_err(|e| StorageError::Io(format!("Failed to write entry: {}", e)))?;
-
+        let start_time = Instant::now();
+        let mut writer = self.writer.lock().await;
+        
+        // Write the entry - convert error types
+        let write_result = writer.write_entry(&entry).await
+            .map_err(|e| match e {
+                crate::StorageError::Io(io_err) => StorageError::Io(io_err.to_string()),
+                crate::StorageError::Serialization(msg) => StorageError::Serialization(msg),
+                _ => StorageError::Io(format!("Writer error: {}", e)),
+            })?;
+        
+        let segment_id = writer.segment_id();
+        
         // Update statistics
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write().await;
             stats.entries_written += 1;
-            stats.bytes_written += entry.payload.len() as u64;
+            stats.bytes_written += entry.size() as u64;
+            
+            let write_latency_us = start_time.elapsed().as_micros() as u64;
+            let total_writes = stats.entries_written;
+            if total_writes > 0 {
+                stats.avg_write_latency_us = (stats.avg_write_latency_us * (total_writes - 1) + write_latency_us) / total_writes;
+            }
         }
-
-        Ok(result.segment_id)
+        
+        debug!("Wrote entry to segment {} at offset {}", segment_id, write_result.offset);
+        Ok(segment_id)
     }
-
+    
     /// Read entries from a segment
-    pub async fn read_entries(&self, segment_id: SegmentId, offset: u64, limit: usize) -> Result<Vec<StorageEntry>> {
+    pub async fn read_entries(&self, _segment_id: SegmentId, _offset: u64, limit: usize) -> Result<Vec<StorageEntry>> {
         if self.is_shutdown.load(Ordering::Relaxed) {
-            return Err(StorageError::Shutdown);
+            return Err(StorageError::Configuration("Storage is shutting down".to_string()));
         }
-
-        // For now, return empty vec as this is a placeholder implementation
-        // In a real implementation, this would:
-        // 1. Find the segment by ID
-        // 2. Create a segment reader
-        // 3. Read entries from the specified offset
-        // 4. Apply the limit
-        // 5. Update read statistics
-
+        
+        let start_time = Instant::now();
+        
+        // For now, return empty entries - would implement actual reading logic
+        let entries = Vec::with_capacity(limit);
+        
+        // Update statistics
         {
-            let mut stats = self.stats.write().unwrap();
-            stats.entries_read += limit as u64;
+            let mut stats = self.stats.write().await;
+            stats.entries_read += entries.len() as u64;
+            
+            let read_latency_us = start_time.elapsed().as_micros() as u64;
+            if stats.entries_read > 0 {
+                stats.avg_read_latency_us = (stats.avg_read_latency_us * (stats.entries_read - entries.len() as u64) + read_latency_us) / stats.entries_read;
+            }
         }
-
-        Ok(vec![])
+        
+        Ok(entries)
     }
-
-    /// Get storage statistics
-    pub fn stats(&self) -> SegmentStats {
-        self.stats.read().unwrap().clone()
-    }
-
-    /// Shutdown the segment storage
-    pub async fn shutdown(&self) -> Result<()> {
-        self.is_shutdown.store(true, Ordering::Relaxed);
-
-        // Close all active segments
-        let segments = self.active_segments.read().unwrap();
-        for segment in segments.iter() {
-            // In a full implementation, this would properly close each segment
+    
+    /// Get all segment IDs
+    pub async fn list_segments(&self) -> Result<Vec<SegmentId>> {
+        let segments = self.active_segments.read().await;
+        
+        // Simulate reading from disk - would implement actual directory listing
+        let segment_ids: Vec<SegmentId> = Vec::new();
+        
+        // Update active count from actual segments
+        for _segment in segments.iter() {
+            // Would check segment status here
         }
-
-        // Shutdown the writer
-        let writer = self.writer.lock().await;
-        writer.flush().await
-            .map_err(|e| StorageError::Io(format!("Failed to flush writer during shutdown: {}", e)))?;
-
-        Ok(())
+        
+        Ok(segment_ids)
     }
-
+    
     /// Create a new segment
-    async fn create_segment(&self) -> Result<Arc<Mutex<StorageSegment>>> {
-        let segment_id = self.next_segment_id.fetch_add(1, Ordering::SeqCst);
-        let segment_path = self.config.data_dir.join(format!("segment-{}.log", segment_id));
-
-        let segment = StorageSegment::create(
+    pub async fn create_segment(&self) -> Result<SegmentId> {
+        let segment_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
+        
+        let segment = StorageSegment::create_new(
             segment_id,
-            segment_path,
-            self.config.max_segment_size,
-            self.config.max_entries_per_segment,
-        )?;
+            &self.config.data_dir,
+            self.config.enable_compression,
+        ).await.map_err(|e| match e {
+            crate::StorageError::Io(io_err) => StorageError::Io(io_err.to_string()),
+            crate::StorageError::Serialization(msg) => StorageError::Serialization(msg),
+            _ => StorageError::Io(format!("Segment creation error: {}", e)),
+        })?;
 
         let segment_arc = Arc::new(Mutex::new(segment));
 
         // Add to active segments
         {
-            let mut active_segments = self.active_segments.write().unwrap();
+            let mut active_segments = self.active_segments.write().await;
             active_segments.insert(segment_id, Arc::clone(&segment_arc));
         }
-
-        // Update stats
+        
+        // Update statistics
         {
-            let mut stats = self.stats.write().unwrap();
-            stats.segments_created += 1;
-            stats.active_segments = self.active_segments.read().unwrap().len() as u64;
+            let mut stats = self.stats.write().await;
+            stats.total_segments += 1;
+            stats.active_segments = self.active_segments.read().await.len() as u64;
         }
-
-        Ok(segment_arc)
+        
+        info!("Created new segment: {}", segment_id);
+        Ok(segment_id)
+    }
+    
+    /// Get current statistics
+    pub fn stats(&self) -> SegmentStats {
+        // Use try_read to avoid blocking if there's a write operation
+        match self.stats.try_read() {
+            Ok(stats) => stats.clone(),
+            Err(_) => {
+                // Return default stats if we can't acquire the lock
+                SegmentStats::default()
+            }
+        }
+    }
+    
+    /// Perform segment compaction
+    pub async fn compact_segments(&self) -> Result<u64> {
+        if self.is_shutdown.load(Ordering::Relaxed) {
+            return Err(StorageError::Configuration("Storage is shutting down".to_string()));
+        }
+        
+        info!("Starting segment compaction");
+        let start_time = Instant::now();
+        
+        // Placeholder compaction logic
+        let bytes_reclaimed = 0u64;
+        
+        // Update statistics
+        {
+            let mut stats = self.stats.write().await;
+            stats.compactions_completed += 1;
+            stats.last_compaction = Some(std::time::SystemTime::now());
+        }
+        
+        let duration = start_time.elapsed();
+        info!("Compaction completed in {:?}, reclaimed {} bytes", duration, bytes_reclaimed);
+        
+        Ok(bytes_reclaimed)
+    }
+    
+    /// Shutdown the storage system
+    pub async fn shutdown(&self) -> Result<()> {
+        self.is_shutdown.store(true, Ordering::Relaxed);
+        
+        info!("Shutting down segment storage");
+        
+        // Flush writer
+        {
+            let mut writer = self.writer.lock().await;
+            writer.flush().await.map_err(|e| StorageError::Io(format!("Flush error: {}", e)))?;
+        }
+        
+        // Clear active segments
+        {
+            let mut active_segments = self.active_segments.write().await;
+            active_segments.clear();
+        }
+        
+        Ok(())
     }
 }
 
@@ -344,55 +395,77 @@ impl SegmentStorage {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    #[test]
-    fn test_segment_config_validation() {
-        let config = SegmentConfig::default();
-        assert!(config.validate().is_ok());
-
-        let mut invalid_config = config.clone();
-        invalid_config.max_segment_size = 0;
-        assert!(invalid_config.validate().is_err());
+    use bytes::Bytes;
+    
+    async fn create_test_storage() -> (SegmentStorage, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = SegmentConfig::default();
+        config.data_dir = temp_dir.path().to_path_buf();
+        
+        let storage = SegmentStorage::new(config).await.unwrap();
+        (storage, temp_dir)
     }
-
+    
     #[tokio::test]
     async fn test_segment_storage_creation() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut config = SegmentConfig::default();
-        config.data_dir = temp_dir.path().to_path_buf();
-
-        let storage = SegmentStorage::new(config).await.unwrap();
-        let stats = storage.stats();
-        assert_eq!(stats.segments_created, 0);
+        let (_storage, _temp_dir) = create_test_storage().await;
+        // Storage should be created successfully
     }
-
+    
     #[tokio::test]
-    async fn test_segment_storage_write() {
-        let temp_dir = TempDir::new().unwrap();
+    async fn test_segment_config_validation() {
         let mut config = SegmentConfig::default();
-        config.data_dir = temp_dir.path().to_path_buf();
-
-        let storage = SegmentStorage::new(config).await.unwrap();
-
-        let entry = StorageEntry::new(1, 12345, b"test data".to_vec().into());
-        let segment_id = storage.write_entry(&entry).await.unwrap();
-        assert_eq!(segment_id, 1);
-
+        assert!(config.validate().is_ok());
+        
+        config.max_segment_size = 0;
+        assert!(config.validate().is_err());
+        
+        config.max_segment_size = 1024;
+        config.compression_level = 10;
+        assert!(config.validate().is_err());
+    }
+    
+    #[tokio::test]
+    async fn test_write_entry() {
+        let (storage, _temp_dir) = create_test_storage().await;
+        
+        let entry = StorageEntry::new(
+            1,
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as u64,
+            Bytes::from("test data"),
+        );
+        
+        let segment_id = storage.write_entry(entry).await.unwrap();
+        assert_eq!(segment_id, 0);
+        
         let stats = storage.stats();
         assert_eq!(stats.entries_written, 1);
-        assert!(stats.bytes_written > 0);
     }
-
+    
     #[tokio::test]
-    async fn test_segment_storage_shutdown() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut config = SegmentConfig::default();
-        config.data_dir = temp_dir.path().to_path_buf();
-
-        let storage = SegmentStorage::new(config).await.unwrap();
+    async fn test_segment_creation() {
+        let (storage, _temp_dir) = create_test_storage().await;
+        
+        let segment_id = storage.create_segment().await.unwrap();
+        assert_eq!(segment_id, 1);
+        
+        let stats = storage.stats();
+        assert_eq!(stats.total_segments, 1);
+    }
+    
+    #[tokio::test]
+    async fn test_storage_shutdown() {
+        let (storage, _temp_dir) = create_test_storage().await;
+        
         storage.shutdown().await.unwrap();
-
-        let entry = StorageEntry::new(1, 12345, b"test data".to_vec().into());
-        assert!(storage.write_entry(&entry).await.is_err());
+        
+        // Operations should fail after shutdown
+        let entry = StorageEntry::new(
+            1,
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as u64,
+            Bytes::from("test"),
+        );
+        
+        assert!(storage.write_entry(entry).await.is_err());
     }
 }

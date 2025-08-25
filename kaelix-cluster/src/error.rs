@@ -269,6 +269,10 @@ pub enum Error {
     /// TOML parsing errors
     #[error("TOML parsing error: {0}")]
     Toml(#[from] toml::de::Error),
+
+    /// Consensus-specific errors from the consensus module
+    #[error("Consensus subsystem error: {0}")]
+    ConsensusSubsystem(#[from] crate::consensus::ConsensusError),
 }
 
 impl Error {
@@ -360,7 +364,8 @@ impl Error {
             Self::Consensus(_)
             | Self::LeaderElection(_)
             | Self::LogReplication(_)
-            | Self::StateMachine(_) => "consensus",
+            | Self::StateMachine(_)
+            | Self::ConsensusSubsystem(_) => "consensus",
             Self::Communication(_)
             | Self::NetworkTransport(_)
             | Self::MessageRouting(_)
@@ -434,7 +439,7 @@ impl Error {
             // Informational errors
             Self::NotImplemented(_) | Self::FeatureUnavailable(_) => ErrorSeverity::Info,
 
-            // Default to medium for other errors
+            // Default to medium for other errors including consensus subsystem errors
             _ => ErrorSeverity::Medium,
         }
     }

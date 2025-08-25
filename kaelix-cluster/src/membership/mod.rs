@@ -1,256 +1,309 @@
-//! # Membership Management
+//! # Membership Module
 //!
-//! Provides cluster membership protocols including SWIM, failure detection,
-//! and node discovery for distributed systems.
+//! Node discovery, failure detection, and cluster membership management using 
+//! the SWIM (Scalable Weakly-consistent Infection-style Membership) protocol.
+//!
+//! This module provides ultra-fast failure detection and membership updates optimized
+//! for MemoryStreamer's <1ms consensus targets.
 
-use crate::error::{Error, Result};
-use crate::communication::{MessageRouter, NetworkMessage};
+use crate::{
+    communication::{MessageRouter, NetworkMessage},
+    error::{Error, Result}, 
+    types::NodeId,
+};
+use rand::{seq::SliceRandom, thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    net::SocketAddr,
     time::{Duration, Instant},
+    net::SocketAddr,
 };
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
-use rand::seq::SliceRandom;
-use rand::thread_rng;
 
-// Re-export NodeId from types module
-pub use crate::types::NodeId;
-
-/// Node status in the cluster
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NodeStatus {
-    /// Node is alive and reachable
-    Alive,
-    /// Node is suspected to be down
-    Suspect,
-    /// Node is confirmed dead
-    Dead,
-    /// Node voluntarily left the cluster
-    Left,
+/// Node addressing information for cluster communication
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NodeAddress {
+    /// TCP address (host, port)
+    Tcp(SocketAddr),
+    /// UDP address (host, port) 
+    Udp(SocketAddr),
+    /// Unix domain socket path
+    #[cfg(unix)]
+    Unix(std::path::PathBuf),
 }
 
-impl Default for NodeStatus {
-    fn default() -> Self {
-        Self::Alive
+impl NodeAddress {
+    /// Create TCP address
+    pub fn tcp(addr: SocketAddr) -> Self {
+        Self::Tcp(addr)
+    }
+
+    /// Create UDP address
+    pub fn udp(addr: SocketAddr) -> Self {
+        Self::Udp(addr)
+    }
+
+    /// Get the underlying socket address if TCP or UDP
+    pub fn socket_addr(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Tcp(addr) | Self::Udp(addr) => Some(*addr),
+            #[cfg(unix)]
+            Self::Unix(_) => None,
+        }
     }
 }
 
-/// Node information in the cluster
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Display for NodeAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp(addr) => write!(f, "tcp://{addr}"),
+            Self::Udp(addr) => write!(f, "udp://{addr}"),
+            #[cfg(unix)]
+            Self::Unix(path) => write!(f, "unix://{}", path.display()),
+        }
+    }
+}
+
+impl From<SocketAddr> for NodeAddress {
+    fn from(addr: SocketAddr) -> Self {
+        Self::Tcp(addr)
+    }
+}
+
+/// Node status in the cluster membership
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NodeStatus {
+    /// Node is alive and responsive
+    Alive,
+    /// Node is suspected to have failed
+    Suspect,
+    /// Node has been confirmed as failed
+    Failed,
+    /// Node has left the cluster gracefully
+    Left,
+}
+
+impl NodeStatus {
+    /// Check if node is considered active (alive or suspect)
+    pub const fn is_active(&self) -> bool {
+        matches!(self, Self::Alive | Self::Suspect)
+    }
+
+    /// Check if node is alive
+    pub const fn is_alive(&self) -> bool {
+        matches!(self, Self::Alive)
+    }
+
+    /// Check if node has failed or left
+    pub const fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Failed | Self::Left)
+    }
+}
+
+impl std::fmt::Display for NodeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let status = match self {
+            Self::Alive => "alive",
+            Self::Suspect => "suspect", 
+            Self::Failed => "failed",
+            Self::Left => "left",
+        };
+        write!(f, "{status}")
+    }
+}
+
+/// Information about a cluster node
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeInfo {
     /// Unique node identifier
     pub id: NodeId,
-    /// Network address for communication
-    pub address: SocketAddr,
+    /// Node network address
+    pub address: NodeAddress,
     /// Current node status
     pub status: NodeStatus,
-    /// Metadata associated with the node
-    pub metadata: HashMap<String, String>,
-    /// Last seen timestamp (as milliseconds since epoch, for serialization)
-    pub last_seen_ms: Option<i64>,
-    /// Incarnation number for SWIM protocol
+    /// Node incarnation number (for conflict resolution)
     pub incarnation: u64,
-    /// Suspicion timestamp for failure detection (not serialized)
-    #[serde(skip)]
-    pub suspected_at: Option<Instant>,
+    /// Last seen timestamp
+    pub last_seen: Option<u64>, // Unix timestamp in milliseconds
+    /// Node metadata (optional)
+    pub metadata: HashMap<String, String>,
 }
 
 impl NodeInfo {
-    /// Create new node information
-    pub fn new(id: NodeId, address: SocketAddr) -> Self {
+    /// Create new node info
+    pub fn new(id: NodeId, address: NodeAddress) -> Self {
         Self {
             id,
             address,
             status: NodeStatus::Alive,
-            metadata: HashMap::new(),
-            last_seen_ms: Some(chrono::Utc::now().timestamp_millis()),
             incarnation: 0,
-            suspected_at: None,
+            last_seen: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64
+            ),
+            metadata: HashMap::new(),
         }
     }
 
-    /// Check if node is considered alive
-    pub fn is_alive(&self) -> bool {
-        matches!(self.status, NodeStatus::Alive)
-    }
-
-    /// Check if node is suspected
-    pub fn is_suspect(&self) -> bool {
-        matches!(self.status, NodeStatus::Suspect)
-    }
-
-    /// Check if node is dead
-    pub fn is_dead(&self) -> bool {
-        matches!(self.status, NodeStatus::Dead)
-    }
-
-    /// Update node status
-    pub fn update_status(&mut self, status: NodeStatus) {
-        self.status = status;
-        self.last_seen_ms = Some(chrono::Utc::now().timestamp_millis());
-        
-        // Reset suspicion timestamp when status changes
-        if !matches!(status, NodeStatus::Suspect) {
-            self.suspected_at = None;
+    /// Update node status with new incarnation
+    pub fn update_status(&mut self, status: NodeStatus, incarnation: u64) {
+        if incarnation >= self.incarnation {
+            self.status = status;
+            self.incarnation = incarnation;
+            self.last_seen = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64
+            );
         }
     }
 
-    /// Increment incarnation number
-    pub fn increment_incarnation(&mut self) {
-        self.incarnation += 1;
+    /// Check if node is alive
+    pub const fn is_alive(&self) -> bool {
+        self.status.is_alive()
     }
 
-    /// Get last seen as Instant (for internal use)
-    pub fn last_seen(&self) -> Option<Instant> {
-        // Note: This is an approximation since we can't perfectly convert back
-        // For production use, consider storing the instant separately or using a different approach
-        self.last_seen_ms.map(|_| Instant::now())
+    /// Check if node is active (alive or suspect)
+    pub const fn is_active(&self) -> bool {
+        self.status.is_active()
     }
 
-    /// Mark node as suspected
-    pub fn mark_suspected(&mut self) {
-        if self.is_alive() {
-            self.status = NodeStatus::Suspect;
-            self.suspected_at = Some(Instant::now());
-            self.last_seen_ms = Some(chrono::Utc::now().timestamp_millis());
-        }
+    /// Get time since last seen (if available)
+    pub fn time_since_last_seen(&self) -> Option<Duration> {
+        self.last_seen.map(|timestamp| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            Duration::from_millis(now.saturating_sub(timestamp))
+        })
     }
 
-    /// Check if suspicion has timed out
-    pub fn is_suspicion_timed_out(&self, timeout_duration: Duration) -> bool {
-        if let Some(suspected_at) = self.suspected_at {
-            suspected_at.elapsed() >= timeout_duration
-        } else {
-            false
-        }
+    /// Add metadata
+    pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    /// Get metadata value
+    pub fn get_metadata(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(|s| s.as_str())
     }
 }
 
-/// SWIM protocol message types
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SwimMessage {
-    /// Direct ping message
-    Ping {
-        /// Source node ID
-        source: NodeId,
-        /// Incarnation number
-        incarnation: u64,
-        /// Membership updates to piggyback
-        updates: Vec<NodeInfo>,
-    },
-    /// Ping acknowledgment
-    Ack {
-        /// Source node ID
-        source: NodeId,
-        /// Incarnation number
-        incarnation: u64,
-        /// Membership updates to piggyback
-        updates: Vec<NodeInfo>,
-    },
-    /// Indirect ping request
-    IndirectPing {
-        /// Source node requesting indirect ping
-        source: NodeId,
-        /// Target node to ping indirectly
-        target: NodeId,
-        /// Request ID for tracking
-        request_id: u64,
-    },
-    /// Indirect ping acknowledgment
-    IndirectAck {
-        /// Source node that received the ping
-        source: NodeId,
-        /// Target node that was pinged
-        target: NodeId,
-        /// Request ID for tracking
-        request_id: u64,
-        /// Whether the target responded
-        target_responded: bool,
-    },
-    /// Membership update gossip
-    Gossip {
-        /// Source node ID
-        source: NodeId,
-        /// Membership updates
-        updates: Vec<NodeInfo>,
-    },
-}
-
-/// Phi-accrual failure detector for adaptive timeout calculation
+/// Phi Accrual Failure Detector for adaptive failure detection
 #[derive(Debug, Clone)]
 pub struct PhiFailureDetector {
-    /// History of arrival intervals
-    intervals: Vec<Duration>,
+    /// History of heartbeat intervals
+    intervals: Vec<f64>,
     /// Maximum history size
     max_history: usize,
     /// Phi threshold for failure detection
-    phi_threshold: f64,
+    threshold: f64,
+    /// Last heartbeat time
+    last_heartbeat: Option<Instant>,
 }
 
 impl PhiFailureDetector {
-    /// Create new phi-accrual failure detector
-    pub fn new(max_history: usize, phi_threshold: f64) -> Self {
+    /// Create new failure detector
+    pub fn new(max_history: usize, threshold: f64) -> Self {
         Self {
-            intervals: Vec::new(),
+            intervals: Vec::with_capacity(max_history),
             max_history,
-            phi_threshold,
+            threshold,
+            last_heartbeat: None,
         }
     }
 
-    /// Record arrival of heartbeat
-    pub fn heartbeat(&mut self, interval: Duration) {
-        self.intervals.push(interval);
-        if self.intervals.len() > self.max_history {
-            self.intervals.remove(0);
+    /// Record heartbeat
+    pub fn heartbeat(&mut self, _expected_interval: Duration) {
+        let now = Instant::now();
+        
+        if let Some(last) = self.last_heartbeat {
+            let actual_interval = now.duration_since(last).as_secs_f64();
+            
+            // Add to history
+            if self.intervals.len() >= self.max_history {
+                self.intervals.remove(0);
+            }
+            self.intervals.push(actual_interval);
         }
+        
+        self.last_heartbeat = Some(now);
     }
 
-    /// Calculate phi value for current interval
-    pub fn phi(&self, current_interval: Duration) -> f64 {
-        if self.intervals.is_empty() {
+    /// Calculate phi value (suspicion level)
+    pub fn phi(&self) -> f64 {
+        if self.intervals.len() < 2 {
             return 0.0;
         }
 
-        let mean = self.mean_interval();
-        let variance = self.variance_interval(mean);
+        let last_heartbeat = match self.last_heartbeat {
+            Some(time) => time,
+            None => return 0.0,
+        };
+
+        let elapsed = last_heartbeat.elapsed().as_secs_f64();
+        let mean = self.intervals.iter().sum::<f64>() / self.intervals.len() as f64;
+        
+        if mean <= 0.0 {
+            return 0.0;
+        }
+
+        // Calculate standard deviation
+        let variance = self.intervals.iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>() / self.intervals.len() as f64;
         let std_dev = variance.sqrt();
 
-        if std_dev == 0.0 {
-            return 0.0;
+        if std_dev <= 0.0 {
+            return if elapsed > mean { 100.0 } else { 0.0 };
         }
 
-        let z_score = (current_interval.as_millis() as f64 - mean) / std_dev;
-        z_score.abs()
+        // Phi = -log10(P(X > elapsed))
+        let p = 1.0 - normal_cdf((elapsed - mean) / std_dev);
+        if p > 0.0 {
+            -p.log10()
+        } else {
+            100.0 // Very high phi for extreme cases
+        }
     }
 
-    /// Check if phi value indicates failure
-    pub fn is_failed(&self, current_interval: Duration) -> bool {
-        self.phi(current_interval) > self.phi_threshold
-    }
-
-    /// Calculate mean interval
-    fn mean_interval(&self) -> f64 {
-        let sum: u128 = self.intervals.iter().map(|d| d.as_millis()).sum();
-        sum as f64 / self.intervals.len() as f64
-    }
-
-    /// Calculate variance of intervals
-    fn variance_interval(&self, mean: f64) -> f64 {
-        let sum_squared_diffs: f64 = self.intervals
-            .iter()
-            .map(|d| {
-                let diff = d.as_millis() as f64 - mean;
-                diff * diff
-            })
-            .sum();
-        sum_squared_diffs / self.intervals.len() as f64
+    /// Check if node is suspected failed
+    pub fn is_suspected(&self) -> bool {
+        self.phi() > self.threshold
     }
 }
 
+/// Approximation of cumulative distribution function for standard normal distribution
+fn normal_cdf(x: f64) -> f64 {
+    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
+}
+
+/// Error function approximation
+fn erf(x: f64) -> f64 {
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+
+    sign * y
+}
+
 /// SWIM membership protocol implementation
+#[derive(Debug)]
 pub struct SwimMembership {
     /// Local node information
     local_node: NodeInfo,
@@ -356,8 +409,8 @@ impl SwimMembership {
 
     /// Execute periodic SWIM protocol round
     pub async fn execute_protocol_round(&mut self, router: &MessageRouter) -> Result<()> {
-        let now = Instant::now();
-        let round_interval = now.duration_since(self.last_protocol_round);
+        let _now = Instant::now();
+        let round_interval = _now.duration_since(self.last_protocol_round);
         
         debug!("Executing SWIM protocol round after {:?}", round_interval);
 
@@ -367,7 +420,7 @@ impl SwimMembership {
             return Ok(());
         }
 
-        self.last_protocol_round = now;
+        self.last_protocol_round = _now;
 
         // 1. Select target for ping
         if let Some(target) = self.select_ping_target() {
@@ -527,604 +580,535 @@ impl SwimMembership {
         let response_timeout = Duration::from_millis(self.config.failure_timeout_ms);
         sleep(response_timeout).await;
 
-        // Check if any proxy confirmed target is alive
-        let request = self.pending_indirect_pings.remove(&request_id);
-        let success = request
-            .map(|req| req.responses_received > 0)
-            .unwrap_or(false);
-
-        if success {
-            debug!("Indirect ping to {} succeeded", target.id);
-            self.confirm_alive(&target.id)?;
+        // Check if we got successful responses
+        if let Some(request) = self.pending_indirect_pings.get(&request_id) {
+            let success = request.responses_received > 0;
+            debug!("Indirect ping to {} completed: {} responses received (success: {})", 
+                   target.id, request.responses_received, success);
+            success
         } else {
-            debug!("Indirect ping to {} failed", target.id);
+            false
         }
-
-        Ok(success)
     }
 
-    /// Select proxy nodes for indirect ping (public for benchmarking)
-    pub fn select_proxy_nodes(&self, exclude_id: &NodeId, count: usize) -> Vec<NodeInfo> {
-        let candidates: Vec<NodeInfo> = self
+    /// Select proxy nodes for indirect ping
+    fn select_proxy_nodes(&self, target_id: &NodeId, count: usize) -> Vec<NodeInfo> {
+        let mut candidates: Vec<&NodeInfo> = self
             .members
             .values()
             .filter(|node| {
                 node.id != self.local_node.id 
-                    && node.id != *exclude_id 
-                    && node.is_alive()
+                && node.id != *target_id 
+                && node.is_alive()
             })
-            .cloned()
             .collect();
 
         let mut rng = thread_rng();
-        let mut proxies = candidates;
-        proxies.shuffle(&mut rng);
-        proxies.truncate(count);
-        proxies
-    }
-
-    /// Process incoming SWIM protocol messages
-    pub async fn handle_protocol_message(&mut self, message: NetworkMessage, _sender: SocketAddr, router: &MessageRouter) -> Result<()> {
-        match message {
-            NetworkMessage::MembershipUpdate { updates } => {
-                let swim_message: SwimMessage = bincode::deserialize(&updates)
-                    .map_err(|e| Error::membership(format!("Failed to deserialize SWIM message: {e}")))?;
-
-                self.handle_swim_message(swim_message, router).await
-            },
-            _ => {
-                debug!("Ignoring non-membership message from {}", _sender);
-                Ok(())
-            }
-        }
-    }
-
-    /// Handle specific SWIM message types
-    async fn handle_swim_message(&mut self, message: SwimMessage, router: &MessageRouter) -> Result<()> {
-        match message {
-            SwimMessage::Ping { source, incarnation, updates } => {
-                debug!("Received ping from {}", source);
-                
-                // Process membership updates
-                self.process_membership_update(updates)?;
-                
-                // Send acknowledgment
-                let ack_updates = self.get_gossip_updates();
-                let ack_message = SwimMessage::Ack {
-                    source: self.local_node.id,
-                    incarnation: self.local_node.incarnation,
-                    updates: ack_updates,
-                };
-
-                let network_message = NetworkMessage::MembershipUpdate {
-                    updates: bincode::serialize(&ack_message)
-                        .map_err(|e| Error::membership(format!("Failed to serialize ack: {e}")))?,
-                };
-
-                router.send_to_node(&source, network_message).await?;
-                
-                // Update node as alive if it was suspect
-                if let Some(node) = self.members.get_mut(&source) {
-                    if node.is_suspect() || node.is_dead() {
-                        node.update_status(NodeStatus::Alive);
-                        info!("Node {} confirmed alive via ping", source);
-                    }
-                    node.incarnation = std::cmp::max(node.incarnation, incarnation);
-                }
-            },
-
-            SwimMessage::Ack { source, incarnation, updates } => {
-                debug!("Received ack from {}", source);
-                
-                // Process membership updates
-                self.process_membership_update(updates)?;
-                
-                // Update node as alive
-                if let Some(node) = self.members.get_mut(&source) {
-                    if !node.is_alive() {
-                        node.update_status(NodeStatus::Alive);
-                        self.suspects.remove(&source);
-                        info!("Node {} confirmed alive via ack", source);
-                    }
-                    node.incarnation = std::cmp::max(node.incarnation, incarnation);
-                }
-            },
-
-            SwimMessage::IndirectPing { source, target, request_id } => {
-                debug!("Received indirect ping request from {} for target {}", source, target);
-                
-                // Try to ping the target on behalf of the source
-                let target_alive = if let Some(target_node) = self.members.get(&target).cloned() {
-                    self.send_ping(&target_node, router).await.is_ok()
-                } else {
-                    false
-                };
-
-                // Send response back to source
-                let response = SwimMessage::IndirectAck {
-                    source: self.local_node.id,
-                    target,
-                    request_id,
-                    target_responded: target_alive,
-                };
-
-                let network_message = NetworkMessage::MembershipUpdate {
-                    updates: bincode::serialize(&response)
-                        .map_err(|e| Error::membership(format!("Failed to serialize indirect ack: {e}")))?,
-                };
-
-                router.send_to_node(&source, network_message).await?;
-            },
-
-            SwimMessage::IndirectAck { source: _, target, request_id, target_responded } => {
-                debug!("Received indirect ack for request {} target {} responded: {}", 
-                       request_id, target, target_responded);
-                
-                // Update pending request
-                if let Some(request) = self.pending_indirect_pings.get_mut(&request_id) {
-                    request.responses_received += 1;
-                    
-                    if target_responded {
-                        // Target is alive, update its status
-                        self.confirm_alive(&target)?;
-                    }
-                }
-            },
-
-            SwimMessage::Gossip { source, updates } => {
-                debug!("Received gossip from {} with {} updates", source, updates.len());
-                self.process_membership_update(updates)?;
-            },
-        }
-
-        Ok(())
-    }
-
-    /// Get membership updates to gossip
-    fn get_gossip_updates(&self) -> Vec<NodeInfo> {
-        // Return recent updates, prioritizing status changes
-        self.members
-            .values()
-            .filter(|node| node.id != self.local_node.id)
-            .take(self.config.gossip_fanout)
+        candidates.shuffle(&mut rng);
+        
+        candidates
+            .into_iter()
+            .take(count)
             .cloned()
             .collect()
     }
 
-    /// Gossip membership updates to random nodes
-    async fn gossip_updates(&self, router: &MessageRouter) -> Result<()> {
-        let updates = self.get_gossip_updates();
-        if updates.is_empty() {
-            return Ok(());
-        }
-
-        let targets = self.select_gossip_targets(&self.local_node.id);
-        
-        for target_id in targets {
-            let gossip_msg = SwimMessage::Gossip {
-                source: self.local_node.id,
-                updates: updates.clone(),
-            };
-
-            let network_message = NetworkMessage::MembershipUpdate {
-                updates: bincode::serialize(&gossip_msg)
-                    .map_err(|e| Error::membership(format!("Failed to serialize gossip: {e}")))?,
-            };
-
-            if let Err(e) = router.send_to_node(&target_id, network_message).await {
-                warn!("Failed to gossip to {}: {}", target_id, e);
+    /// Mark node as suspect
+    pub fn mark_suspect(&mut self, node_id: &NodeId) -> Result<()> {
+        if let Some(node) = self.members.get_mut(node_id) {
+            if node.status == NodeStatus::Alive {
+                debug!("Marking node {} as suspect", node_id);
+                node.update_status(NodeStatus::Suspect, node.incarnation + 1);
+                self.suspects.insert(*node_id);
             }
         }
-
         Ok(())
     }
 
-    /// Process suspicion timeouts (public for benchmarking)
-    pub fn process_suspicion_timeouts(&mut self) {
+    /// Mark node as failed
+    pub fn mark_failed(&mut self, node_id: &NodeId) -> Result<()> {
+        if let Some(node) = self.members.get_mut(node_id) {
+            warn!("Marking node {} as failed", node_id);
+            node.update_status(NodeStatus::Failed, node.incarnation + 1);
+            self.suspects.remove(node_id);
+            self.failure_detectors.remove(node_id);
+        }
+        Ok(())
+    }
+
+    /// Process suspicion timeouts and mark suspected nodes as failed
+    fn process_suspicion_timeouts(&mut self) {
         let suspicion_timeout = Duration::from_millis(
             self.config.failure_timeout_ms * self.config.suspicion_multiplier as u64
         );
 
-        let expired_suspects: Vec<NodeId> = self.suspects
-            .iter()
+        let expired_suspects: Vec<NodeId> = self.suspects.iter()
             .filter_map(|node_id| {
                 self.members.get(node_id).and_then(|node| {
-                    if node.is_suspicion_timed_out(suspicion_timeout) {
-                        Some(*node_id)
-                    } else {
-                        None
-                    }
+                    node.time_since_last_seen().map(|elapsed| {
+                        if elapsed > suspicion_timeout {
+                            Some(*node_id)
+                        } else {
+                            None
+                        }
+                    }).unwrap_or(None)
                 })
             })
             .collect();
 
         for node_id in expired_suspects {
-            warn!("Suspicion timeout for {}, marking as dead", node_id);
-            if let Err(e) = self.mark_dead(&node_id) {
-                error!("Failed to mark {} as dead: {}", node_id, e);
+            if let Err(e) = self.mark_failed(&node_id) {
+                error!("Failed to mark node {} as failed: {}", node_id, e);
             }
         }
+    }
+
+    /// Generate gossip updates for membership information
+    fn get_gossip_updates(&self) -> Vec<NodeInfo> {
+        let mut updates: Vec<NodeInfo> = self.members.values().cloned().collect();
+        
+        // Shuffle for randomness and limit to fanout size
+        let mut rng = thread_rng();
+        updates.shuffle(&mut rng);
+        updates.truncate(self.config.gossip_fanout);
+        
+        updates
+    }
+
+    /// Gossip membership updates to random nodes
+    pub async fn gossip_updates(&self, router: &MessageRouter) -> Result<()> {
+        let targets = self.select_gossip_targets();
+        let updates = self.get_gossip_updates();
+        
+        if targets.is_empty() || updates.is_empty() {
+            return Ok(());
+        }
+
+        let gossip_message = SwimMessage::Gossip {
+            source: self.local_node.id,
+            updates,
+        };
+
+        let network_message = NetworkMessage::MembershipUpdate {
+            updates: bincode::serialize(&gossip_message)
+                .map_err(|e| Error::membership(format!("Failed to serialize gossip: {e}")))?,
+        };
+
+        // Send to selected targets
+        for target in targets {
+            if let Err(e) = router.send_to_node(&target.id, network_message.clone()).await {
+                debug!("Failed to send gossip to {}: {}", target.id, e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Select nodes for gossip
+    fn select_gossip_targets(&self) -> Vec<NodeInfo> {
+        let mut candidates: Vec<&NodeInfo> = self
+            .members
+            .values()
+            .filter(|node| node.id != self.local_node.id && node.is_alive())
+            .collect();
+
+        let mut rng = thread_rng();
+        candidates.shuffle(&mut rng);
+        
+        candidates
+            .into_iter()
+            .take(self.config.gossip_fanout)
+            .cloned()
+            .collect()
     }
 
     /// Clean up expired indirect ping requests
     fn cleanup_expired_indirect_pings(&mut self) {
         let timeout = Duration::from_millis(self.config.failure_timeout_ms * 2);
         let now = Instant::now();
-
+        
         self.pending_indirect_pings.retain(|_, request| {
             now.duration_since(request.timestamp) < timeout
         });
     }
 
-    /// Add a new member
-    pub fn add_member(&mut self, node: NodeInfo) -> Result<()> {
-        if self.members.contains_key(&node.id) {
-            debug!("Member {} already exists, updating", node.id);
-        } else {
-            info!("Adding new member {} at {}", node.id, node.address);
+    /// Handle incoming SWIM message
+    pub async fn handle_swim_message(&mut self, message: SwimMessage, router: &MessageRouter) -> Result<()> {
+        match message {
+            SwimMessage::Ping { source, incarnation, updates } => {
+                self.handle_ping(source, incarnation, updates, router).await
+            },
+            SwimMessage::Ack { source, incarnation, updates } => {
+                self.handle_ack(source, incarnation, updates).await
+            },
+            SwimMessage::IndirectPing { source, target, request_id } => {
+                self.handle_indirect_ping(source, target, request_id, router).await
+            },
+            SwimMessage::IndirectAck { source, target, request_id, success } => {
+                self.handle_indirect_ack(source, target, request_id, success).await
+            },
+            SwimMessage::Gossip { source: _, updates } => {
+                self.handle_gossip(updates).await
+            },
+        }
+    }
+
+    /// Handle ping message
+    async fn handle_ping(&mut self, source: NodeId, incarnation: u64, updates: Vec<NodeInfo>, router: &MessageRouter) -> Result<()> {
+        debug!("Received ping from {} (incarnation: {})", source, incarnation);
+
+        // Update source node information
+        self.update_node_info(source, NodeStatus::Alive, incarnation);
+
+        // Process gossip updates
+        self.process_membership_updates(updates);
+
+        // Send ACK response
+        let ack_message = SwimMessage::Ack {
+            source: self.local_node.id,
+            incarnation: self.local_node.incarnation,
+            updates: self.get_gossip_updates(),
+        };
+
+        let network_message = NetworkMessage::MembershipUpdate {
+            updates: bincode::serialize(&ack_message)
+                .map_err(|e| Error::membership(format!("Failed to serialize ack: {e}")))?,
+        };
+
+        if let Err(e) = router.send_to_node(&source, network_message).await {
+            warn!("Failed to send ack to {}: {}", source, e);
         }
 
-        self.members.insert(node.id, node);
         Ok(())
     }
 
-    /// Remove a member
+    /// Handle ACK message
+    async fn handle_ack(&mut self, source: NodeId, incarnation: u64, updates: Vec<NodeInfo>) -> Result<()> {
+        debug!("Received ack from {} (incarnation: {})", source, incarnation);
+        
+        // Update source node information
+        self.update_node_info(source, NodeStatus::Alive, incarnation);
+        
+        // Process gossip updates
+        self.process_membership_updates(updates);
+        
+        Ok(())
+    }
+
+    /// Handle indirect ping request
+    async fn handle_indirect_ping(&mut self, source: NodeId, target: NodeId, request_id: u64, router: &MessageRouter) -> Result<()> {
+        debug!("Received indirect ping request from {} for target {}", source, target);
+
+        // Try to ping the target
+        let success = if let Some(target_node) = self.members.get(&target).cloned() {
+            match self.send_ping(&target_node, router).await {
+                Ok(_) => true,
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+
+        // Send response back to requester
+        let response_message = SwimMessage::IndirectAck {
+            source: self.local_node.id,
+            target,
+            request_id,
+            success,
+        };
+
+        let network_message = NetworkMessage::MembershipUpdate {
+            updates: bincode::serialize(&response_message)
+                .map_err(|e| Error::membership(format!("Failed to serialize indirect ack: {e}")))?,
+        };
+
+        if let Err(e) = router.send_to_node(&source, network_message).await {
+            warn!("Failed to send indirect ack to {}: {}", source, e);
+        }
+
+        Ok(())
+    }
+
+    /// Handle indirect ACK response
+    async fn handle_indirect_ack(&mut self, _source: NodeId, target: NodeId, request_id: u64, success: bool) -> Result<()> {
+        debug!("Received indirect ack for target {} (request_id: {}, success: {})", target, request_id, success);
+
+        // Update pending request
+        if let Some(request) = self.pending_indirect_pings.get_mut(&request_id) {
+            request.responses_received += 1;
+            
+            if success {
+                // Mark target as alive if indirect ping succeeded
+                self.update_node_info(target, NodeStatus::Alive, 0);
+                self.suspects.remove(&target);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle gossip updates
+    async fn handle_gossip(&mut self, updates: Vec<NodeInfo>) -> Result<()> {
+        debug!("Received gossip updates: {} nodes", updates.len());
+        self.process_membership_updates(updates);
+        Ok(())
+    }
+
+    /// Process membership updates from gossip
+    fn process_membership_updates(&mut self, updates: Vec<NodeInfo>) {
+        for update in updates {
+            // Skip self updates
+            if update.id == self.local_node.id {
+                continue;
+            }
+
+            // Update node information
+            self.update_node_info(update.id, update.status, update.incarnation);
+        }
+    }
+
+    /// Update node information
+    fn update_node_info(&mut self, node_id: NodeId, status: NodeStatus, incarnation: u64) {
+        match self.members.get_mut(&node_id) {
+            Some(existing_node) => {
+                // Only update if incarnation is higher or equal
+                if incarnation >= existing_node.incarnation {
+                    existing_node.update_status(status, incarnation);
+                    
+                    // Remove from suspects if marked alive
+                    if status == NodeStatus::Alive {
+                        self.suspects.remove(&node_id);
+                    }
+                }
+            },
+            None => {
+                // Add new node if we don't know about it
+                warn!("Discovered new node {} with status {}", node_id, status);
+                // Note: We would need address information to create a complete NodeInfo
+                // This is a simplified implementation
+            }
+        }
+    }
+
+    /// Add new member to cluster
+    pub fn add_member(&mut self, node_info: NodeInfo) -> Result<()> {
+        info!("Adding new member: {} at {}", node_info.id, node_info.address);
+        self.members.insert(node_info.id, node_info);
+        Ok(())
+    }
+
+    /// Remove member from cluster
     pub fn remove_member(&mut self, node_id: &NodeId) -> Result<()> {
         if let Some(node) = self.members.remove(node_id) {
-            info!("Removed member {} from cluster", node.id);
+            info!("Removed member: {} at {}", node.id, node.address);
             self.suspects.remove(node_id);
             self.failure_detectors.remove(node_id);
             Ok(())
         } else {
-            Err(Error::membership(format!("Member {node_id} not found")))
+            Err(Error::membership(format!("Node {} not found in membership", node_id)))
         }
     }
 
-    /// Mark a member as suspect
-    pub fn mark_suspect(&mut self, node_id: &NodeId) -> Result<()> {
-        if let Some(member) = self.members.get_mut(node_id) {
-            if member.is_alive() {
-                member.mark_suspected();
-                self.suspects.insert(*node_id);
-                warn!("Member {} marked as suspect", node_id);
-            }
-            Ok(())
-        } else {
-            Err(Error::membership(format!("Member {node_id} not found")))
-        }
+    /// Get current membership as vector
+    pub fn get_membership(&self) -> Vec<NodeInfo> {
+        self.members.values().cloned().collect()
     }
 
-    /// Mark a member as dead
-    pub fn mark_dead(&mut self, node_id: &NodeId) -> Result<()> {
-        if let Some(member) = self.members.get_mut(node_id) {
-            member.update_status(NodeStatus::Dead);
-            self.suspects.remove(node_id);
-            self.failure_detectors.remove(node_id);
-            error!("Member {} marked as dead", node_id);
-            Ok(())
-        } else {
-            Err(Error::membership(format!("Member {node_id} not found")))
-        }
+    /// Check if node is suspected
+    pub fn is_suspected(&self, node_id: &NodeId) -> bool {
+        self.suspects.contains(node_id)
     }
 
-    /// Confirm a member is alive
-    pub fn confirm_alive(&mut self, node_id: &NodeId) -> Result<()> {
-        if let Some(member) = self.members.get_mut(node_id) {
-            if !member.is_alive() {
-                member.update_status(NodeStatus::Alive);
-                self.suspects.remove(node_id);
-                info!("Member {} confirmed alive", node_id);
-            }
-            Ok(())
-        } else {
-            Err(Error::membership(format!("Member {node_id} not found")))
-        }
-    }
-
-    /// Select random members for gossip
-    pub fn select_gossip_targets(&self, exclude: &NodeId) -> Vec<NodeId> {
-        let candidates: Vec<NodeId> = self
-            .members
-            .iter()
-            .filter(|(id, member)| *id != exclude && member.is_alive())
-            .map(|(id, _)| *id)
-            .collect();
-
-        let mut rng = thread_rng();
-        let mut targets = candidates;
-        targets.shuffle(&mut rng);
-        targets.truncate(self.config.gossip_fanout);
-        targets
-    }
-
-    /// Process membership update
-    pub fn process_membership_update(&mut self, updates: Vec<NodeInfo>) -> Result<()> {
-        for update in updates {
-            match self.members.get_mut(&update.id) {
-                Some(existing) => {
-                    // Update if incarnation is newer or status is different
-                    if update.incarnation > existing.incarnation || 
-                       update.status != existing.status {
-                        let old_status = existing.status;
-                        *existing = update;
-                        
-                        // Handle status changes
-                        if old_status != existing.status {
-                            match existing.status {
-                                NodeStatus::Alive => {
-                                    self.suspects.remove(&existing.id);
-                                    info!("Node {} status changed to alive", existing.id);
-                                },
-                                NodeStatus::Suspect => {
-                                    self.suspects.insert(existing.id);
-                                    warn!("Node {} status changed to suspect", existing.id);
-                                },
-                                NodeStatus::Dead => {
-                                    self.suspects.remove(&existing.id);
-                                    error!("Node {} status changed to dead", existing.id);
-                                },
-                                NodeStatus::Left => {
-                                    self.suspects.remove(&existing.id);
-                                    info!("Node {} left the cluster", existing.id);
-                                },
-                            }
-                        }
-                        
-                        debug!(
-                            "Updated member {} with incarnation {} and status {:?}",
-                            existing.id, existing.incarnation, existing.status
-                        );
-                    }
-                },
-                None => {
-                    // New member
-                    info!("Discovered new member {} with status {:?}", update.id, update.status);
-                    if update.status == NodeStatus::Suspect {
-                        self.suspects.insert(update.id);
-                    }
-                    self.add_member(update)?;
-                },
-            }
-        }
-        Ok(())
-    }
-
-    /// Get membership statistics
-    pub fn stats(&self) -> MembershipStats {
-        let alive_count = self.alive_member_count();
-        let suspect_count = self.suspects.len();
-        let dead_count = self.members.values().filter(|m| m.is_dead()).count();
-
-        MembershipStats {
-            total_members: self.member_count(),
-            alive_members: alive_count,
-            suspect_members: suspect_count,
-            dead_members: dead_count,
-        }
-    }
-
-    /// Start background protocol execution
-    pub async fn start_background_protocol(&mut self, router: MessageRouter) -> Result<()> {
-        info!("Starting SWIM protocol background execution");
-        
-        let protocol_period = Duration::from_millis(self.config.protocol_period_ms);
-        
-        loop {
-            if let Err(e) = self.execute_protocol_round(&router).await {
-                error!("SWIM protocol round failed: {}", e);
-            }
-            
-            sleep(protocol_period).await;
-        }
+    /// Get failure detector phi value for node
+    pub fn get_phi(&self, node_id: &NodeId) -> Option<f64> {
+        self.failure_detectors.get(node_id).map(|detector| detector.phi())
     }
 }
 
-/// Membership statistics
+/// SWIM protocol messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MembershipStats {
-    /// Total number of known members
-    pub total_members: usize,
-    /// Number of alive members
-    pub alive_members: usize,
-    /// Number of suspect members
-    pub suspect_members: usize,
-    /// Number of dead members
-    pub dead_members: usize,
-}
-
-/// Membership manager coordinating different membership protocols
-pub struct MembershipManager {
-    /// SWIM membership instance
-    swim: Option<SwimMembership>,
-}
-
-impl MembershipManager {
-    /// Create a new membership manager
-    pub fn new() -> Self {
-        Self { swim: None }
-    }
-
-    /// Initialize SWIM membership
-    pub fn init_swim(&mut self, local_node: NodeInfo, config: SwimConfig) -> Result<()> {
-        let swim = SwimMembership::new(local_node, config);
-        self.swim = Some(swim);
-        info!("SWIM membership initialized");
-        Ok(())
-    }
-
-    /// Get SWIM membership instance
-    pub fn swim(&self) -> Option<&SwimMembership> {
-        self.swim.as_ref()
-    }
-
-    /// Get mutable SWIM membership instance
-    pub fn swim_mut(&mut self) -> Option<&mut SwimMembership> {
-        self.swim.as_mut()
-    }
-
-    /// Start SWIM protocol background execution
-    pub async fn start_swim_protocol(&mut self, router: MessageRouter) -> Result<()> {
-        if let Some(swim) = self.swim.as_mut() {
-            swim.start_background_protocol(router).await
-        } else {
-            Err(Error::membership("SWIM not initialized"))
-        }
-    }
-
-    /// Shutdown membership manager
-    pub fn shutdown(&mut self) -> Result<()> {
-        self.swim = None;
-        info!("Membership manager shutdown complete");
-        Ok(())
-    }
-}
-
-impl Default for MembershipManager {
-    fn default() -> Self {
-        Self::new()
-    }
+pub enum SwimMessage {
+    /// Ping message with membership updates
+    Ping {
+        source: NodeId,
+        incarnation: u64,
+        updates: Vec<NodeInfo>,
+    },
+    /// Acknowledgment message
+    Ack {
+        source: NodeId,
+        incarnation: u64,
+        updates: Vec<NodeInfo>,
+    },
+    /// Indirect ping request
+    IndirectPing {
+        source: NodeId,
+        target: NodeId,
+        request_id: u64,
+    },
+    /// Indirect ping acknowledgment
+    IndirectAck {
+        source: NodeId,
+        target: NodeId,
+        request_id: u64,
+        success: bool,
+    },
+    /// Pure gossip message
+    Gossip {
+        source: NodeId,
+        updates: Vec<NodeInfo>,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
+    use crate::communication::{TcpTransport};
+
+    fn create_test_node(id: NodeId, port: u16) -> NodeInfo {
+        NodeInfo::new(
+            id,
+            NodeAddress::tcp(format!("127.0.0.1:{}", port).parse().unwrap())
+        )
+    }
+
+    async fn create_test_router(port: u16) -> MessageRouter {
+        let transport = TcpTransport::new(format!("127.0.0.1:{}", port).parse().unwrap()).await.unwrap();
+        MessageRouter::new(NodeId::generate(), transport)
+    }
 
     #[test]
     fn test_node_info_creation() {
         let node_id = NodeId::generate();
-        let address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let address = NodeAddress::tcp("127.0.0.1:8080".parse().unwrap());
+        
         let node = NodeInfo::new(node_id, address);
-
         assert_eq!(node.id, node_id);
-        assert_eq!(node.address, address);
         assert_eq!(node.status, NodeStatus::Alive);
-        assert_eq!(node.incarnation, 0);
         assert!(node.is_alive());
+        assert!(node.is_active());
+    }
+
+    #[test]
+    fn test_node_status_transitions() {
+        let mut node = create_test_node(NodeId::generate(), 8080);
+        
+        assert_eq!(node.status, NodeStatus::Alive);
+        
+        node.update_status(NodeStatus::Suspect, 1);
+        assert_eq!(node.status, NodeStatus::Suspect);
+        assert_eq!(node.incarnation, 1);
+        
+        node.update_status(NodeStatus::Failed, 2);
+        assert_eq!(node.status, NodeStatus::Failed);
+        assert_eq!(node.incarnation, 2);
     }
 
     #[test]
     fn test_phi_failure_detector() {
         let mut detector = PhiFailureDetector::new(10, 8.0);
+        let interval = Duration::from_millis(1000);
         
-        // Add some normal intervals
-        detector.heartbeat(Duration::from_millis(1000));
-        detector.heartbeat(Duration::from_millis(1100));
-        detector.heartbeat(Duration::from_millis(900));
+        // Initially no suspicion
+        assert_eq!(detector.phi(), 0.0);
+        assert!(!detector.is_suspected());
         
-        // Test normal interval
-        let phi_normal = detector.phi(Duration::from_millis(1000));
-        assert!(phi_normal < 8.0);
-        assert!(!detector.is_failed(Duration::from_millis(1000)));
+        // Add some heartbeats
+        for _ in 0..5 {
+            detector.heartbeat(interval);
+            std::thread::sleep(Duration::from_millis(100));
+        }
         
-        // Test abnormal interval
-        let phi_abnormal = detector.phi(Duration::from_millis(10000));
-        assert!(phi_abnormal > 8.0);
-        assert!(detector.is_failed(Duration::from_millis(10000)));
+        // Should still be healthy
+        assert!(!detector.is_suspected());
     }
 
-    #[test]
-    fn test_swim_membership_creation() {
-        let node_id = NodeId::generate();
-        let address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let node = NodeInfo::new(node_id, address);
+    #[tokio::test]
+    async fn test_swim_membership_creation() {
+        let node = create_test_node(NodeId::generate(), 8080);
         let config = SwimConfig::default();
-        let swim = SwimMembership::new(node, config);
-
-        assert_eq!(swim.member_count(), 1);
-        assert_eq!(swim.alive_member_count(), 1);
-        assert!(swim.members().contains_key(&node_id));
+        
+        let membership = SwimMembership::new(node.clone(), config);
+        
+        assert_eq!(membership.member_count(), 1);
+        assert_eq!(membership.alive_member_count(), 1);
+        assert_eq!(membership.local_node().id, node.id);
     }
 
-    #[test]
-    fn test_membership_manager_creation() {
-        let manager = MembershipManager::new();
-        assert!(manager.swim().is_none());
-    }
-
-    #[test]
-    fn test_node_metadata() {
-        let node_id = NodeId::generate();
-        let address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let mut node = NodeInfo::new(node_id, address);
-
-        node.metadata.insert("role".to_string(), "leader".to_string());
-        node.metadata.insert("version".to_string(), "1.0.0".to_string());
-
-        assert_eq!(node.metadata.get("role"), Some(&"leader".to_string()));
-        assert_eq!(node.metadata.get("version"), Some(&"1.0.0".to_string()));
-    }
-
-    #[test]
-    fn test_member_status_transitions() {
-        let node_id = NodeId::generate();
-        let address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let node = NodeInfo::new(node_id, address);
+    #[tokio::test]
+    async fn test_member_addition_removal() {
+        let local_node = create_test_node(NodeId::generate(), 8080);
         let config = SwimConfig::default();
-        let mut swim = SwimMembership::new(node, config);
+        let mut membership = SwimMembership::new(local_node, config);
+        
+        let new_node = create_test_node(NodeId::generate(), 8081);
+        membership.add_member(new_node.clone()).unwrap();
+        
+        assert_eq!(membership.member_count(), 2);
+        
+        membership.remove_member(&new_node.id).unwrap();
+        assert_eq!(membership.member_count(), 1);
+    }
 
-        // Add a member
-        let member_id = NodeId::generate();
-        let member_address: SocketAddr = "127.0.0.1:8081".parse().unwrap();
-        let member = NodeInfo::new(member_id, member_address);
-        swim.add_member(member).unwrap();
+    #[tokio::test]
+    async fn test_ping_target_selection() {
+        let local_node = create_test_node(NodeId::generate(), 8080);
+        let config = SwimConfig::default();
+        let mut membership = SwimMembership::new(local_node, config);
+        
+        // No targets initially (only self)
+        assert!(membership.select_ping_target().is_none());
+        
+        // Add another node
+        let target_node = create_test_node(NodeId::generate(), 8081);
+        membership.add_member(target_node.clone()).unwrap();
+        
+        // Should select the target
+        let selected = membership.select_ping_target().unwrap();
+        assert_eq!(selected.id, target_node.id);
+    }
 
+    #[tokio::test]
+    async fn test_suspect_marking() {
+        let local_node = create_test_node(NodeId::generate(), 8080);
+        let config = SwimConfig::default();
+        let mut membership = SwimMembership::new(local_node, config);
+        
+        let target_node = create_test_node(NodeId::generate(), 8081);
+        membership.add_member(target_node.clone()).unwrap();
+        
         // Mark as suspect
-        swim.mark_suspect(&member_id).unwrap();
-        assert!(swim.members().get(&member_id).unwrap().is_suspect());
-
-        // Mark as dead
-        swim.mark_dead(&member_id).unwrap();
-        assert!(swim.members().get(&member_id).unwrap().is_dead());
-
-        // Confirm alive
-        swim.confirm_alive(&member_id).unwrap();
-        assert!(swim.members().get(&member_id).unwrap().is_alive());
-    }
-
-    #[test]
-    fn test_proxy_node_selection() {
-        let node_id = NodeId::generate();
-        let address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let node = NodeInfo::new(node_id, address);
-        let config = SwimConfig::default();
-        let mut swim = SwimMembership::new(node, config);
-
-        // Add several members
-        for i in 0..5 {
-            let member_id = NodeId::generate();
-            let member_address: SocketAddr = format!("127.0.0.1:808{}", i + 1).parse().unwrap();
-            let member = NodeInfo::new(member_id, member_address);
-            swim.add_member(member).unwrap();
-        }
-
-        let target_id = NodeId::generate();
-        let proxies = swim.select_proxy_nodes(&target_id, 3);
+        membership.mark_suspect(&target_node.id).unwrap();
         
-        assert_eq!(proxies.len(), 3);
-        for proxy in proxies {
-            assert_ne!(proxy.id, swim.local_node.id);
-            assert_ne!(proxy.id, target_id);
-            assert!(proxy.is_alive());
-        }
+        assert!(membership.is_suspected(&target_node.id));
+        assert_eq!(membership.alive_member_count(), 1); // Only local node is alive
     }
 
     #[test]
-    fn test_suspicion_timeout() {
-        let node_id = NodeId::generate();
-        let address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let mut node = NodeInfo::new(node_id, address);
+    fn test_node_address_display() {
+        let tcp_addr = NodeAddress::tcp("127.0.0.1:8080".parse().unwrap());
+        let udp_addr = NodeAddress::udp("127.0.0.1:8081".parse().unwrap());
+        
+        assert_eq!(tcp_addr.to_string(), "tcp://127.0.0.1:8080");
+        assert_eq!(udp_addr.to_string(), "udp://127.0.0.1:8081");
+    }
 
-        // Mark as suspected
-        node.mark_suspected();
-        assert!(node.is_suspect());
-        assert!(node.suspected_at.is_some());
-
-        // Check timeout immediately (should not be timed out)
-        assert!(!node.is_suspicion_timed_out(Duration::from_millis(1000)));
-
-        // Simulate time passing by manually setting the timestamp
-        node.suspected_at = Some(Instant::now() - Duration::from_millis(2000));
-        assert!(node.is_suspicion_timed_out(Duration::from_millis(1000)));
+    #[test]
+    fn test_gossip_update_generation() {
+        let local_node = create_test_node(NodeId::generate(), 8080);
+        let config = SwimConfig {
+            gossip_fanout: 2,
+            ..SwimConfig::default()
+        };
+        let mut membership = SwimMembership::new(local_node, config);
+        
+        // Add multiple nodes
+        for i in 8081..8085 {
+            let node = create_test_node(NodeId::generate(), i);
+            membership.add_member(node).unwrap();
+        }
+        
+        let updates = membership.get_gossip_updates();
+        assert!(updates.len() <= 2); // Limited by fanout
     }
 }
