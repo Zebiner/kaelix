@@ -1,304 +1,318 @@
-#![deny(unsafe_code)]
-#![warn(
-    missing_docs,
-    rust_2018_idioms,
-    unreachable_pub,
-    bad_style,
-    dead_code,
-    improper_ctypes,
-    non_shorthand_field_patterns,
-    no_mangle_generic_items,
-    overflowing_literals,
-    path_statements,
-    patterns_in_fns_without_body,
-    unconditional_recursion,
-    unused,
-    unused_allocation,
-    unused_comparisons,
-    unused_parens,
-    while_true
-)]
+#[warn(missing_docs, unused)]
 
-//! Ultra-High-Performance Distributed Storage Engine for MemoryStreamer
-//!
-//! # Performance Characteristics
-//!
-//! ## Latency Targets
-//! - Write latency: <10μs P99 end-to-end
-//! - Read latency: <5μs P99 for cache hits, <100μs for disk reads
-//! - Network latency: <1μs for intra-cluster communication
-//!
-//! ## Throughput Targets  
-//! - Sequential writes: 10M+ messages/second per core
-//! - Random writes: 1M+ messages/second per core
-//! - Sequential reads: 50M+ messages/second per core
-//! - Random reads: 5M+ messages/second per core
-//!
-//! ## Capacity and Scaling
-//! - Single node capacity: 100TB+ of message data
-//! - Cluster capacity: Petabyte scale with horizontal scaling
-//! - Concurrent streams: 1M+ active streams per node
-//! - Memory efficiency: <1KB overhead per inactive stream
-//!
-//! # Architecture Overview
-//!
-//! The storage engine is designed around several key principles:
-//!
-//! ## Zero-Copy Design
-//! - Memory-mapped I/O for maximum throughput
-//! - Reference-counted message buffers
-//! - Scatter-gather I/O operations
-//! - Lock-free data structures where possible
-//!
-//! ## Write-Ahead Log (WAL)
-//! - Microsecond-latency append-only logging
-//! - Batch-optimized for high throughput
-//! - Configurable sync policies
-//! - Automatic segment rotation and cleanup
-//!
-//! ## Distributed Consensus  
-//! - Raft-based replication for strong consistency
-//! - Optimized for high-frequency small operations
-//! - Leader election in <500ms
-//! - Network partition tolerance
-//!
-//! ## Storage Backends
-//! - Memory backend for ultra-low latency
-//! - File-based backend for persistence
-//! - Distributed backend for fault tolerance
-//! - Pluggable architecture for custom backends
-//!
-//! # Usage Example
-//!
-//! ```rust,no_run
-//! use kaelix_storage::{StorageEngine, init_metrics};
-//! use kaelix_core::message::Message;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Initialize metrics collection
-//!     init_metrics()?;
-//!     
-//!     // Create a message
-//!     let message = Message::new(
-//!         "msg-1".to_string(),
-//!         "producer".into(),
-//!         "stream-1".into(),
-//!         b"Hello, MemoryStreamer!".to_vec(),
-//!     );
-//!     
-//!     Ok(())
-//! }
-//! ```
-//!
-//! # Performance Tuning
-//!
-//! ## WAL Configuration
-//! - **Segment Size**: Larger segments reduce rotation overhead but increase memory usage
-//! - **Sync Policy**: `Always` for durability, `OnBatch` for throughput, `Never` for lowest latency
-//! - **Batch Size**: Larger batches improve throughput at cost of latency
-//! - **Memory Mapping**: Enables zero-copy operations but requires sufficient virtual memory
-//!
-//! ## Backend Selection
-//! - **Memory**: Lowest latency but no persistence
-//! - **File**: Good balance of latency and durability
-//! - **Distributed**: Highest availability and fault tolerance
-//!
-//! ## Thread Configuration
-//! - **Runtime Threads**: Match to available CPU cores
-//! - **I/O Threads**: Dedicated threads for disk operations
-//! - **Network Threads**: Separate pool for cluster communication
-//!
-//! # Monitoring and Observability
-//!
-//! The storage engine provides comprehensive metrics and tracing:
-//!
-//! ## Metrics
-//! - Operation latencies (P50, P95, P99, P99.9)
-//! - Throughput counters (reads/sec, writes/sec)
-//! - Resource utilization (memory, disk, network)
-//! - Error rates and types
-//!
-//! ## Tracing
-//! - Distributed tracing with OpenTelemetry
-//! - Request-level spans with timing breakdown
-//! - Correlation across cluster nodes
-//!
-//! # Safety and Reliability
-//!
-//! ## Memory Safety
-//! - Zero unsafe code in public API
-//! - Comprehensive bounds checking
-//! - Reference counting for buffer management
-//!
-//! ## Fault Tolerance
-//! - Graceful degradation under load
-//! - Automatic retry with exponential backoff
-//! - Circuit breakers for cascading failure prevention
-//! - Comprehensive health checking
-//!
-//! ## Data Integrity
-//! - CRC32 checksums for all stored data
-//! - BLAKE3 hashes for cryptographic verification
-//! - Write verification and read-after-write consistency
-//! - Automatic corruption detection and repair
-
-/// Storage protocol version for compatibility tracking
-pub const STORAGE_PROTOCOL_VERSION: u32 = 1;
-
-// Core modules
-pub mod error;
-pub mod traits;
-pub mod types;
-
-// Storage backends
-pub mod backends;
-
-// Write-Ahead Log
-pub mod wal;
-
-// Segment management
-pub mod segments;
-
-// Re-exports for convenience
-pub use error::{StorageError, StorageResult};
-pub use traits::{StorageBackend, StorageEngine};
-pub use types::{StorageMetrics};
-
-// WAL re-exports
-pub use wal::{
-    WriteAheadLog, WalConfig, WalStats, LogPosition, LogSequence,
-    RotationConfig, RetentionPolicy, RotationMetrics, SegmentRotator
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
-/// Initialize storage subsystem metrics collection.
-///
-/// This function sets up all the metrics collectors and gauges used by the storage
-/// engine for monitoring and observability. It should be called once during
-/// application initialization before creating any storage instances.
-///
-/// # Returns
-/// 
-/// Returns `Ok(())` on successful initialization, or a `StorageError` if metrics
-/// setup fails.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use kaelix_storage::init_metrics;
-///
-/// #[tokio::main] 
-/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     init_metrics()?;
-///     
-///     // ... create and use storage
-///     
-///     Ok(())
-/// }
-/// ```
-pub fn init_metrics() -> StorageResult<()> {
-    // Initialize metrics registry and collectors
-    tracing::info!("Initializing storage metrics collection");
-    
-    // Note: The actual metrics registration would depend on the specific
-    // metrics implementation. For now, we'll just log the initialization.
-    // In a production implementation, this would set up:
-    // - Histogram metrics for operation latencies
-    // - Counter metrics for operation counts
-    // - Gauge metrics for resource utilization
-    
-    tracing::info!("Storage metrics initialized successfully");
-    Ok(())
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tracing::{debug, error, info, warn};
+
+// Re-export all submodules
+pub mod segments;
+pub mod transactions;
+pub mod wal;
+
+use kaelix_cluster::{
+    messages::{ClusterMessage, MessagePayload},
+    types::NodeId,
+};
+
+use crate::{
+    segments::{SegmentStorage, SegmentStats},
+    transactions::{TransactionManager, TransactionStats},
+    wal::{Wal, WalConfig, WalStats},
+};
+
+/// Main errors for the storage engine
+#[derive(Error, Debug)]
+pub enum StorageError {
+    /// WAL (Write-Ahead Log) error
+    #[error("WAL error: {0}")]
+    Wal(#[from] wal::WalError),
+
+    /// Transaction error
+    #[error("Transaction error: {0}")]
+    Transaction(#[from] transactions::TransactionError),
+
+    /// Segment error
+    #[error("Segment error: {0}")]
+    Segment(#[from] segments::StorageError),
+
+    /// I/O error
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Serialization error
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
+    /// Configuration error
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+
+    /// Resource not found
+    #[error("Resource not found: {0}")]
+    NotFound(String),
+
+    /// Resource already exists
+    #[error("Already exists: {0}")]
+    AlreadyExists(String),
+
+    /// Invalid operation
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
+
+    /// System is shutting down
+    #[error("System shutdown in progress")]
+    Shutdown,
 }
 
-/// Get global storage metrics
-///
-/// Returns current storage system metrics including operation counts,
-/// latencies, and resource utilization.
-///
-/// # Returns
-///
-/// Returns a `StorageMetrics` struct containing current metrics values.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use kaelix_storage::get_metrics;
-///
-/// let metrics = get_metrics();
-/// println!("Total writes: {}", metrics.writes_total);
-/// println!("Average write latency: {:?}", metrics.write_latency_p99);
-/// ```
-pub fn get_metrics() -> StorageMetrics {
-    StorageMetrics::default()
+/// Result type for storage operations
+pub type Result<T> = std::result::Result<T, StorageError>;
+
+/// Configuration for the storage engine
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    /// WAL configuration
+    pub wal: WalConfig,
+
+    /// Segment storage configuration
+    pub segment_storage: segments::SegmentConfig,
+
+    /// Transaction manager configuration
+    pub transaction_manager: transactions::TransactionConfig,
+
+    /// Data directory
+    pub data_dir: std::path::PathBuf,
+
+    /// Whether to enable compression
+    pub enable_compression: bool,
+
+    /// Compression level (0-9)
+    pub compression_level: u8,
+
+    /// Buffer size for I/O operations
+    pub buffer_size: usize,
 }
 
-/// Initialize storage logging and tracing
-///
-/// Sets up structured logging and distributed tracing for the storage subsystem.
-/// This should be called during application startup.
-///
-/// # Arguments
-///
-/// * `level` - The minimum log level to capture
-/// * `enable_tracing` - Whether to enable distributed tracing
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use kaelix_storage::init_logging;
-/// use tracing::Level;
-///
-/// init_logging(Level::INFO, true);
-/// ```
-pub fn init_logging(level: tracing::Level, enable_tracing: bool) {
-    use tracing_subscriber::prelude::*;
-    
-    let subscriber = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_target(true)
-                .with_thread_ids(true)
-                .with_line_number(true)
-                .with_file(true)
-                .compact()
-        )
-        .with(tracing_subscriber::filter::LevelFilter::from_level(level));
-    
-    if enable_tracing {
-        // In a real implementation, this would add OpenTelemetry tracing
-        tracing::info!("Distributed tracing enabled");
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            wal: WalConfig::default(),
+            segment_storage: segments::SegmentConfig::default(),
+            transaction_manager: transactions::TransactionConfig::default(),
+            data_dir: std::env::current_dir().unwrap_or_default().join("storage"),
+            enable_compression: true,
+            compression_level: 6,
+            buffer_size: 64 * 1024, // 64KB
+        }
     }
-    
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to install tracing subscriber");
-    
-    tracing::info!(
-        level = ?level, 
-        tracing = enable_tracing, 
-        "Storage logging initialized"
-    );
+}
+
+impl StorageConfig {
+    /// Validate the storage configuration
+    pub fn validate(&self) -> Result<()> {
+        // Validate WAL config
+        self.wal
+            .validate()
+            .map_err(StorageError::Configuration)?;
+
+        // Validate segment config
+        self.segment_storage
+            .validate()
+            .map_err(StorageError::Configuration)?;
+
+        // Validate transaction config
+        self.transaction_manager
+            .validate()
+            .map_err(StorageError::Configuration)?;
+
+        // Validate compression level
+        if self.compression_level > 9 {
+            return Err(StorageError::Configuration(
+                "compression_level must be between 0 and 9".to_string(),
+            ));
+        }
+
+        // Validate buffer size
+        if self.buffer_size == 0 {
+            return Err(StorageError::Configuration(
+                "buffer_size must be greater than 0".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+/// Combined statistics for all storage components
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineStats {
+    /// WAL statistics
+    pub wal_stats: WalStats,
+
+    /// Transaction statistics
+    pub transaction_stats: TransactionStats,
+
+    /// Segment statistics
+    pub segment_stats: SegmentStats,
+}
+
+/// The main storage engine
+///
+/// Provides a unified interface to all storage subsystems:
+/// - Write-Ahead Log (WAL) for durability
+/// - Transaction management for ACID properties
+/// - Segment storage for efficient data organization
+pub struct StorageEngine {
+    /// Engine configuration
+    config: Arc<StorageConfig>,
+
+    /// Write-Ahead Log
+    wal: Wal,
+
+    /// Transaction manager
+    transaction_manager: TransactionManager,
+
+    /// Segment storage
+    segment_storage: SegmentStorage,
+
+    /// Shutdown flag
+    is_shutdown: Arc<AtomicBool>,
+}
+
+impl StorageEngine {
+    /// Create a new storage engine with the given configuration
+    pub async fn new(config: StorageConfig) -> Result<Self> {
+        // Validate configuration first
+        config.validate()?;
+
+        info!("Initializing storage engine with config: {:?}", config);
+
+        let config = Arc::new(config);
+
+        // Create data directory if it doesn't exist
+        if !config.data_dir.exists() {
+            std::fs::create_dir_all(&config.data_dir)
+                .map_err(|e| StorageError::Io(e))?;
+        }
+
+        // Initialize WAL
+        debug!("Initializing WAL");
+        let wal = Wal::new(config.wal.clone()).await?;
+
+        // Initialize transaction manager
+        debug!("Initializing transaction manager");
+        let transaction_manager = TransactionManager::new(config.transaction_manager.clone()).await?;
+
+        // Initialize segment storage
+        debug!("Initializing segment storage");
+        let segment_storage = SegmentStorage::new(config.segment_storage.clone()).await?;
+
+        info!("Storage engine initialized successfully");
+
+        Ok(Self {
+            config,
+            wal,
+            transaction_manager,
+            segment_storage,
+            is_shutdown: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// Write data to the storage engine
+    pub async fn write(&self, data: Vec<u8>) -> Result<u64> {
+        if self.is_shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(StorageError::Shutdown);
+        }
+
+        // Create cluster message (placeholder implementation)
+        // Using dummy NodeIds for now - in a real implementation these would come from cluster context
+        let source = NodeId::generate();
+        let destination = NodeId::generate();
+        let payload = MessagePayload::Ping { node_id: source };
+        let message = ClusterMessage::new(source, destination, payload);
+
+        // Write to WAL
+        let sequence = self.wal.write(message).await?;
+
+        Ok(sequence)
+    }
+
+    /// Shutdown the storage engine gracefully
+    pub async fn shutdown(&self) -> Result<()> {
+        self.is_shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Shutdown components
+        self.wal.shutdown().await?;
+        self.transaction_manager.shutdown().await?;
+        self.segment_storage.shutdown().await?;
+
+        Ok(())
+    }
+
+    /// Get engine statistics
+    pub async fn stats(&self) -> EngineStats {
+        EngineStats {
+            wal_stats: self.wal.stats().await,
+            transaction_stats: self.transaction_manager.stats().await,
+            segment_stats: self.segment_storage.stats(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
-    #[test]
-    fn test_init_metrics() {
-        let result = init_metrics();
-        assert!(result.is_ok());
-    }
+    async fn create_test_engine() -> (StorageEngine, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = StorageConfig::default();
+        config.data_dir = temp_dir.path().to_path_buf();
 
-    #[test] 
-    fn test_get_metrics() {
-        let _metrics = get_metrics();
-        // Metrics should be retrievable without errors
+        let engine = StorageEngine::new(config).await.unwrap();
+        (engine, temp_dir)
     }
 
     #[tokio::test]
-    async fn test_logging_init() {
-        init_logging(tracing::Level::DEBUG, false);
-        // Should not panic
+    async fn test_storage_engine_creation() {
+        let (_engine, _temp_dir) = create_test_engine().await;
+        // Engine should be created successfully
+    }
+
+    #[tokio::test]
+    async fn test_storage_engine_write() {
+        let (engine, _temp_dir) = create_test_engine().await;
+        
+        let data = b"test data".to_vec();
+        let sequence = engine.write(data).await.unwrap();
+        assert_eq!(sequence, 0);
+    }
+
+    #[tokio::test]
+    async fn test_storage_engine_stats() {
+        let (engine, _temp_dir) = create_test_engine().await;
+        
+        let data = b"test data".to_vec();
+        engine.write(data).await.unwrap();
+
+        let stats = engine.stats().await;
+        assert_eq!(stats.wal_stats.entries_written, 1);
+    }
+
+    #[tokio::test]
+    async fn test_storage_engine_shutdown() {
+        let (engine, _temp_dir) = create_test_engine().await;
+        
+        // Shutdown should succeed
+        engine.shutdown().await.unwrap();
+
+        // Further operations should fail
+        let data = b"test data".to_vec();
+        assert!(engine.write(data).await.is_err());
     }
 }

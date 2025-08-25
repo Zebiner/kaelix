@@ -86,7 +86,7 @@ pub trait StorageEngine: Send + Sync + 'static {
     ///
     /// ```rust
     /// use kaelix_storage::{StorageEngine, StorageMessage};
-    /// 
+    ///
     /// async fn append_message(engine: &dyn StorageEngine, msg: StorageMessage) {
     ///     match engine.append(msg).await {
     ///         Ok(result) => {
@@ -163,7 +163,7 @@ pub trait StorageEngine: Send + Sync + 'static {
     ///
     /// ```rust
     /// use kaelix_storage::{StorageEngine, LogOffset};
-    /// 
+    ///
     /// async fn read_message(engine: &dyn StorageEngine, offset: LogOffset) {
     ///     match engine.read(offset).await {
     ///         Ok(message) => {
@@ -273,7 +273,7 @@ pub trait StorageEngine: Send + Sync + 'static {
     ///
     /// ```rust
     /// use kaelix_storage::StorageEngine;
-    /// 
+    ///
     /// async fn ensure_durability(engine: &dyn StorageEngine) {
     ///     match engine.flush().await {
     ///         Ok(result) => {
@@ -312,7 +312,7 @@ pub trait StorageEngine: Send + Sync + 'static {
     ///
     /// ```rust
     /// use kaelix_storage::StorageEngine;
-    /// 
+    ///
     /// async fn monitor_storage(engine: &dyn StorageEngine) {
     ///     let metrics = engine.metrics();
     ///     println!("Write throughput: {:.2} msg/s", metrics.write_throughput_mps);

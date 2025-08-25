@@ -1,0 +1,25 @@
+--- 
++++ 
+@@ -646,8 +646,9 @@
+             RetentionPolicy::ByCount(max_count) => {
+                 while segments.len() > *max_count {
+-                    if let Some(segment) = segments.remove(0) {  // Remove oldest
+-                        if let Err(e) = std::fs::remove_file(&segment.file_path) {
++                    if !segments.is_empty() {
++                        let segment = segments.remove(0);  // Remove oldest
++                        if let Err(e) = std::fs::remove_file(&segment.file_path) {
+                             warn!("Failed to delete segment file {:?}: {}", segment.file_path, e);
+                         } else {
+                             removed_count += 1;
+@@ -662,8 +663,9 @@
+                     .sum();
+ 
+                 while total_size > *max_total_size && !segments.is_empty() {
+-                    if let Some(segment) = segments.remove(0) {  // Remove oldest
+-                        total_size -= segment.metadata.metadata.size;
++                    if !segments.is_empty() {
++                        let segment = segments.remove(0);  // Remove oldest
++                        total_size -= segment.metadata.metadata.size;
+                         
+                         if let Err(e) = std::fs::remove_file(&segment.file_path) {
+                             warn!("Failed to delete segment file {:?}: {}", segment.file_path, e);

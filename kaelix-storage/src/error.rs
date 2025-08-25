@@ -50,104 +50,100 @@ pub enum StorageError {
         reason: String,
     },
 
-    /// Batch operation failed
-    #[error("Batch operation failed: processed {processed} of {total} items: {reason}")]
-    BatchOperationFailed {
-        /// Number of successfully processed items
-        processed: usize,
-        /// Total number of items in batch
-        total: usize,
-        /// Specific reason for batch failure
+    /// Seek operation failed
+    #[error("Seek operation failed to offset {offset}: {reason}")]
+    SeekFailed {
+        /// Target offset for seek operation
+        offset: u64,
+        /// Specific reason for seek failure
         reason: String,
     },
 
-    /// Invalid offset provided
-    #[error("Invalid offset: {offset} (reason: {reason})")]
-    InvalidOffset {
-        /// The invalid offset value
-        offset: u64,
-        /// Reason why offset is invalid
+    /// File system operation failed
+    #[error("File system operation '{operation}' failed on path '{path}': {reason}")]
+    FileSystemError {
+        /// File system operation that failed
+        operation: String,
+        /// File path involved in the operation
+        path: String,
+        /// Specific reason for file system failure
         reason: String,
     },
 
-    /// Message not found at specified offset
-    #[error("Message not found at offset {offset}")]
-    MessageNotFound {
-        /// Offset where message was expected
-        offset: u64,
+    /// Storage backend unavailable
+    #[error("Storage backend unavailable: {reason}")]
+    BackendUnavailable {
+        /// Specific reason for backend unavailability
+        reason: String,
     },
 
-    /// Message corruption detected
-    #[error("Message corruption detected at offset {offset}: {details}")]
-    MessageCorrupted {
-        /// Offset of corrupted message
+    /// Data corruption detected
+    #[error("Data corruption detected at offset {offset}: {details}")]
+    DataCorrupted {
+        /// Offset where corruption was detected
         offset: u64,
         /// Details about the corruption
         details: String,
     },
 
-    /// Storage backend unavailable
-    #[error("Storage backend unavailable: {backend_type}")]
-    BackendUnavailable {
-        /// Type of storage backend that is unavailable
-        backend_type: String,
-    },
-
-    /// Storage capacity exceeded
-    #[error("Storage capacity exceeded: {used} / {capacity} bytes")]
-    CapacityExceeded {
-        /// Currently used storage in bytes
-        used: u64,
-        /// Total storage capacity in bytes
-        capacity: u64,
-    },
-
-    /// Replication failure in distributed storage
-    #[error("Replication failed to node {node_id}: {reason}")]
-    ReplicationFailed {
-        /// Node ID where replication failed
-        node_id: NodeId,
-        /// Specific reason for replication failure
-        reason: String,
-    },
-
-    /// Consensus failure in distributed storage
-    #[error("Consensus failed: required {required} replicas, got {achieved}")]
-    ConsensusFailed {
-        /// Number of replicas required for consensus
-        required: usize,
-        /// Number of replicas that achieved consensus
-        achieved: usize,
-    },
-
-    /// Network partition detected
-    #[error("Network partition detected: {details}")]
-    NetworkPartition {
-        /// Details about the network partition
+    /// Message corruption detected
+    #[error("Message corruption detected at offset {offset}: {details}")]
+    MessageCorrupted {
+        /// Offset where message corruption was detected
+        offset: u64,
+        /// Details about the message corruption
         details: String,
     },
 
-    /// Storage configuration error
-    #[error("Storage configuration error: {parameter} = {value} ({reason})")]
-    ConfigurationError {
-        /// Configuration parameter name
-        parameter: String,
-        /// Invalid parameter value
-        value: String,
-        /// Reason why configuration is invalid
-        reason: String,
+    /// Message not found
+    #[error("Message with ID {message_id} not found")]
+    MessageNotFound {
+        /// Message ID that was not found
+        message_id: String,
     },
 
-    /// Resource exhaustion error
-    #[error("Resource exhausted: {resource} ({details})")]
-    ResourceExhausted {
-        /// Type of resource that was exhausted
+    /// Sequence number not found
+    #[error("Sequence number {sequence} not found")]
+    SequenceNotFound {
+        /// Sequence number that was not found
+        sequence: u64,
+    },
+
+    /// Invalid offset specified
+    #[error("Invalid offset: {offset} exceeds segment size {segment_size}")]
+    InvalidOffset {
+        /// Invalid offset value
+        offset: u64,
+        /// Current segment size
+        segment_size: u64,
+    },
+
+    /// Serialization failed
+    #[error("Serialization failed: {details}")]
+    SerializationError {
+        /// Details about serialization failure
+        details: String,
+    },
+
+    /// Deserialization failed
+    #[error("Deserialization failed at offset {offset}: {details}")]
+    DeserializationError {
+        /// Offset where deserialization failed
+        offset: u64,
+        /// Details about deserialization failure
+        details: String,
+    },
+
+    /// Lock acquisition failed
+    #[error("Lock acquisition failed for resource '{resource}': {reason}")]
+    LockAcquisitionFailed {
+        /// Resource that couldn't be locked
         resource: String,
-        /// Additional details about resource exhaustion
-        details: String,
+        /// Specific reason for lock failure
+        reason: String,
     },
 
-    /// Timeout occurred during operation
+    /// Operation timeout
     #[error("Operation timeout after {duration_ms}ms: {operation}")]
     OperationTimeout {
         /// Operation that timed out
@@ -156,40 +152,105 @@ pub enum StorageError {
         duration_ms: u64,
     },
 
-    /// Lock acquisition failed
-    #[error("Lock acquisition failed: {lock_type} (waited {wait_duration_ms}ms)")]
-    LockAcquisitionFailed {
-        /// Type of lock that failed to acquire
-        lock_type: String,
-        /// Duration waited for lock in milliseconds
-        wait_duration_ms: u64,
+    /// Network partition detected
+    #[error("Network partition detected: isolated from {node_count} nodes")]
+    NetworkPartition {
+        /// Number of nodes that are unreachable
+        node_count: usize,
     },
 
-    /// Serialization error
-    #[error("Serialization error: {details}")]
-    SerializationError {
-        /// Details about serialization failure
-        details: String,
-    },
-
-    /// Deserialization error
-    #[error("Deserialization error at offset {offset}: {details}")]
-    DeserializationError {
-        /// Offset where deserialization failed
-        offset: u64,
-        /// Details about deserialization failure
-        details: String,
-    },
-
-    /// File system operation failed
-    #[error("File system operation failed: {operation} on {path}: {reason}")]
-    FileSystemError {
-        /// File system operation that failed
-        operation: String,
-        /// File path involved in the operation
-        path: String,
-        /// Specific reason for failure
+    /// Replication failed
+    #[error("Replication failed to {node_id}: {reason}")]
+    ReplicationFailed {
+        /// Node ID where replication failed
+        node_id: NodeId,
+        /// Specific reason for replication failure
         reason: String,
+    },
+
+    /// Consensus operation failed
+    #[error("Consensus failed: {operation} (term: {term})")]
+    ConsensusFailed {
+        /// Consensus operation that failed
+        operation: String,
+        /// Raft term during which failure occurred
+        term: u64,
+    },
+
+    /// Resource exhausted
+    #[error("Resource exhausted: {resource} limit exceeded ({current}/{limit})")]
+    ResourceExhausted {
+        /// Resource that was exhausted
+        resource: String,
+        /// Current resource usage
+        current: u64,
+        /// Resource limit
+        limit: u64,
+    },
+
+    /// Configuration error
+    #[error("Configuration error: {parameter} is invalid: {reason}")]
+    ConfigurationError {
+        /// Configuration parameter with invalid value
+        parameter: String,
+        /// Reason why the configuration is invalid
+        reason: String,
+    },
+
+    /// Authentication failed
+    #[error("Authentication failed for node {node_id}: {reason}")]
+    AuthenticationFailed {
+        /// Node ID that failed authentication
+        node_id: NodeId,
+        /// Reason for authentication failure
+        reason: String,
+    },
+
+    /// Authorization failed
+    #[error("Authorization failed: operation '{operation}' not permitted")]
+    AuthorizationFailed {
+        /// Operation that was not authorized
+        operation: String,
+    },
+
+    /// Storage capacity exceeded
+    #[error("Storage capacity exceeded: {used}/{capacity} bytes used")]
+    CapacityExceeded {
+        /// Currently used storage in bytes
+        used: u64,
+        /// Total storage capacity in bytes
+        capacity: u64,
+    },
+
+    /// Version mismatch
+    #[error(
+        "Version mismatch: {component} version {actual} incompatible with expected {expected}"
+    )]
+    VersionMismatch {
+        /// Component with version mismatch
+        component: String,
+        /// Actual version found
+        actual: String,
+        /// Expected version
+        expected: String,
+    },
+
+    /// Operation not supported
+    #[error("Operation not supported: {operation} - {reason}")]
+    OperationNotSupported {
+        /// Unsupported operation
+        operation: String,
+        /// Reason why operation is not supported
+        reason: String,
+    },
+
+    /// Invalid operation state
+    #[error("Invalid operation state: cannot perform '{operation}' in state '{state}'")]
+    InvalidState {
+        /// Operation being attempted
+        operation: String,
+        /// Current state that prevents the operation
+        state: String,
     },
 
     /// I/O operation error
@@ -197,7 +258,7 @@ pub enum StorageError {
     IoError {
         /// Operation during which I/O error occurred
         operation: String,
-        /// Underlying I/O error
+        /// Underlying I/O error (Note: io::Error doesn't implement Clone)
         #[source]
         source: io::Error,
     },
@@ -242,7 +303,23 @@ pub enum StorageError {
         total: usize,
     },
 
-    /// Generic internal error for unexpected conditions
+    /// Transaction operation failed
+    #[error("Transaction {transaction_id} failed: {reason}")]
+    TransactionFailed {
+        /// Transaction identifier
+        transaction_id: u64,
+        /// Specific reason for transaction failure
+        reason: String,
+    },
+
+    /// Replay operation failed
+    #[error("Replay operation failed: {reason}")]
+    ReplayError {
+        /// Specific reason for replay failure
+        reason: String,
+    },
+
+    /// Internal storage error (catch-all for unexpected errors)
     #[error("Internal storage error: {message}")]
     InternalError {
         /// Error message describing the internal error
@@ -250,18 +327,41 @@ pub enum StorageError {
     },
 }
 
+// Note: We cannot implement Clone for StorageError because io::Error doesn't implement Clone
+// If cloning is needed, we need to convert the error to a cloneable form first
+
+// Conversion from ConversionError to StorageError
+impl From<crate::integration::ConversionError> for StorageError {
+    fn from(err: crate::integration::ConversionError) -> Self {
+        match err {
+            crate::integration::ConversionError::SerializationFailed { reason } => {
+                Self::SerializationError { details: reason }
+            },
+            crate::integration::ConversionError::DeserializationFailed { reason } => {
+                Self::DeserializationError { offset: 0, details: reason }
+            },
+            crate::integration::ConversionError::InvalidFormat { details } => {
+                Self::SerializationError { details }
+            },
+            crate::integration::ConversionError::TopicConversionFailed { topic } => {
+                Self::SerializationError { details: format!("Topic conversion failed: {}", topic) }
+            },
+        }
+    }
+}
+
 impl StorageError {
     /// Check if error is transient and operation can be retried
     ///
     /// # Returns
     ///
-    /// `true` if the error condition is likely temporary and the operation
-    /// may succeed if retried after a short delay.
+    /// `true` if the error condition might be temporary and retrying the operation
+    /// could succeed, `false` if the error is permanent.
     ///
-    /// # Examples
+    /// # Example
     ///
-    /// ```rust
-    /// use kaelix_storage::error::StorageError;
+    /// ```rust,no_run
+    /// use kaelix_storage::StorageError;
     ///
     /// let error = StorageError::OperationTimeout {
     ///     operation: "write".to_string(),
@@ -283,113 +383,127 @@ impl StorageError {
                 | Self::ReplicationFailed { .. }
                 | Self::ConsensusFailed { .. }
                 | Self::ResourceExhausted { .. }
-                | Self::IoError { .. }
         )
     }
 
-    /// Check if error indicates data corruption
+    /// Get error severity level
     ///
     /// # Returns
     ///
-    /// `true` if the error indicates data corruption that may require
-    /// recovery or repair operations.
-    #[must_use]
-    pub fn is_corruption(&self) -> bool {
-        matches!(
-            self,
-            Self::MessageCorrupted { .. }
-                | Self::DeserializationError { .. }
-                | Self::ProtocolVersionMismatch { .. }
-        )
-    }
-
-    /// Check if error is related to capacity constraints
+    /// Error severity classification for logging and monitoring purposes.
     ///
-    /// # Returns
+    /// # Example
     ///
-    /// `true` if the error is due to capacity limits being reached.
-    #[must_use]
-    pub fn is_capacity_related(&self) -> bool {
-        matches!(self, Self::CapacityExceeded { .. } | Self::ResourceExhausted { .. })
-    }
-
-    /// Check if error is configuration-related
+    /// ```rust,no_run
+    /// use kaelix_storage::{StorageError, ErrorSeverity};
     ///
-    /// # Returns
+    /// let error = StorageError::DataCorrupted {
+    ///     offset: 1024,
+    ///     details: "checksum mismatch".to_string(),
+    /// };
     ///
-    /// `true` if the error is due to invalid or incompatible configuration.
-    #[must_use]
-    pub fn is_configuration_error(&self) -> bool {
-        matches!(self, Self::ConfigurationError { .. } | Self::ProtocolVersionMismatch { .. })
-    }
-
-    /// Get error severity level for monitoring and alerting
-    ///
-    /// # Returns
-    ///
-    /// [`ErrorSeverity`] indicating the severity level of this error.
+    /// match error.severity() {
+    ///     ErrorSeverity::Critical => println!("Critical error requires immediate attention"),
+    ///     ErrorSeverity::High => println!("High severity error"),
+    ///     ErrorSeverity::Medium => println!("Medium severity error"),
+    ///     ErrorSeverity::Low => println!("Low severity error"),
+    /// }
+    /// ```
     #[must_use]
     pub fn severity(&self) -> ErrorSeverity {
         match self {
-            // Critical errors requiring immediate attention
-            Self::MessageCorrupted { .. }
-            | Self::RecoveryFailed { .. }
-            | Self::NetworkPartition { .. } => ErrorSeverity::Critical,
+            Self::DataCorrupted { .. }
+            | Self::MessageCorrupted { .. }
+            | Self::CapacityExceeded { .. }
+            | Self::InternalError { .. } => ErrorSeverity::Critical,
 
-            // High severity errors affecting system operation
             Self::InitializationFailed { .. }
             | Self::ShutdownFailed { .. }
             | Self::BackendUnavailable { .. }
-            | Self::CapacityExceeded { .. }
-            | Self::ConsensusFailed { .. } => ErrorSeverity::High,
+            | Self::ConsensusFailed { .. }
+            | Self::AuthenticationFailed { .. }
+            | Self::AuthorizationFailed { .. } => ErrorSeverity::High,
 
-            // Medium severity errors affecting individual operations
             Self::WriteFailed { .. }
             | Self::ReadFailed { .. }
-            | Self::BatchOperationFailed { .. }
             | Self::ReplicationFailed { .. }
-            | Self::WalError { .. }
-            | Self::SegmentError { .. } => ErrorSeverity::Medium,
-
-            // Low severity errors for individual requests
-            Self::InvalidOffset { .. }
-            | Self::MessageNotFound { .. }
+            | Self::RecoveryFailed { .. }
+            | Self::TransactionFailed { .. }
+            | Self::ReplayError { .. }
             | Self::OperationTimeout { .. }
-            | Self::LockAcquisitionFailed { .. }
+            | Self::NetworkPartition { .. } => ErrorSeverity::Medium,
+
+            Self::SeekFailed { .. }
+            | Self::FileSystemError { .. }
+            | Self::MessageNotFound { .. }
+            | Self::SequenceNotFound { .. }
+            | Self::InvalidOffset { .. }
             | Self::SerializationError { .. }
-            | Self::DeserializationError { .. } => ErrorSeverity::Low,
-
-            // Configuration and setup issues
-            Self::ConfigurationError { .. } | Self::ProtocolVersionMismatch { .. } => {
-                ErrorSeverity::Medium
-            }
-
-            // System resource issues
-            Self::ResourceExhausted { .. } | Self::FileSystemError { .. } | Self::IoError { .. } => {
-                ErrorSeverity::High
-            }
-
-            // Catch-all for internal errors
-            Self::InternalError { .. } => ErrorSeverity::High,
+            | Self::DeserializationError { .. }
+            | Self::LockAcquisitionFailed { .. }
+            | Self::ResourceExhausted { .. }
+            | Self::ConfigurationError { .. }
+            | Self::VersionMismatch { .. }
+            | Self::OperationNotSupported { .. }
+            | Self::InvalidState { .. }
+            | Self::IoError { .. }
+            | Self::ProtocolVersionMismatch { .. }
+            | Self::WalError { .. }
+            | Self::SegmentError { .. } => ErrorSeverity::Low,
         }
     }
 
-    /// Create a new I/O error with context
+    /// Create a file system error
     ///
     /// # Parameters
     ///
-    /// * `operation` - Description of the operation that failed
-    /// * `source` - The underlying I/O error
+    /// * `operation` - File system operation that failed
+    /// * `path` - Path involved in the operation
+    /// * `reason` - Reason for the failure
     ///
     /// # Returns
     ///
-    /// A new [`StorageError::IoError`] with the provided context.
+    /// A new [`StorageError::FileSystemError`] instance.
     #[must_use]
-    pub fn io_error(operation: impl Into<String>, source: io::Error) -> Self {
-        Self::IoError { operation: operation.into(), source }
+    pub fn file_system_error(operation: &str, path: &str, reason: &str) -> Self {
+        Self::FileSystemError {
+            operation: operation.to_string(),
+            path: path.to_string(),
+            reason: reason.to_string(),
+        }
     }
 
-    /// Create a new serialization error
+    /// Create a data corruption error
+    ///
+    /// # Parameters
+    ///
+    /// * `offset` - Offset where corruption was detected
+    /// * `details` - Details about the corruption
+    ///
+    /// # Returns
+    ///
+    /// A new [`StorageError::DataCorrupted`] instance.
+    #[must_use]
+    pub fn data_corrupted(offset: u64, details: &str) -> Self {
+        Self::DataCorrupted { offset, details: details.to_string() }
+    }
+
+    /// Create an I/O error
+    ///
+    /// # Parameters
+    ///
+    /// * `operation` - I/O operation that failed
+    /// * `source` - Underlying I/O error
+    ///
+    /// # Returns
+    ///
+    /// A new [`StorageError::IoError`] instance.
+    #[must_use]
+    pub fn io_error(operation: &str, source: io::Error) -> Self {
+        Self::IoError { operation: operation.to_string(), source }
+    }
+
+    /// Create a serialization error
     ///
     /// # Parameters
     ///
@@ -397,13 +511,13 @@ impl StorageError {
     ///
     /// # Returns
     ///
-    /// A new [`StorageError::SerializationError`] with the provided details.
+    /// A new [`StorageError::SerializationError`] instance.
     #[must_use]
-    pub fn serialization_error(details: impl Into<String>) -> Self {
-        Self::SerializationError { details: details.into() }
+    pub fn serialization_error(details: &str) -> Self {
+        Self::SerializationError { details: details.to_string() }
     }
 
-    /// Create a new deserialization error
+    /// Create a deserialization error
     ///
     /// # Parameters
     ///
@@ -412,52 +526,172 @@ impl StorageError {
     ///
     /// # Returns
     ///
-    /// A new [`StorageError::DeserializationError`] with the provided context.
+    /// A new [`StorageError::DeserializationError`] instance.
     #[must_use]
-    pub fn deserialization_error(offset: u64, details: impl Into<String>) -> Self {
-        Self::DeserializationError { offset, details: details.into() }
+    pub fn deserialization_error(offset: u64, details: &str) -> Self {
+        Self::DeserializationError { offset, details: details.to_string() }
+    }
+
+    /// Create a transaction failed error
+    ///
+    /// # Parameters
+    ///
+    /// * `transaction_id` - Transaction identifier
+    /// * `reason` - Reason for the transaction failure
+    ///
+    /// # Returns
+    ///
+    /// A new [`StorageError::TransactionFailed`] instance.
+    #[must_use]
+    pub fn transaction_failed(transaction_id: u64, reason: &str) -> Self {
+        Self::TransactionFailed { transaction_id, reason: reason.to_string() }
+    }
+
+    /// Create a replay error
+    ///
+    /// # Parameters
+    ///
+    /// * `reason` - Reason for the replay failure
+    ///
+    /// # Returns
+    ///
+    /// A new [`StorageError::ReplayError`] instance.
+    #[must_use]
+    pub fn replay_error(reason: &str) -> Self {
+        Self::ReplayError { reason: reason.to_string() }
+    }
+
+    /// Create a message not found error
+    ///
+    /// # Parameters
+    ///
+    /// * `message_id` - Message ID that was not found
+    ///
+    /// # Returns
+    ///
+    /// A new [`StorageError::MessageNotFound`] instance.
+    #[must_use]
+    pub fn message_not_found(message_id: &str) -> Self {
+        Self::MessageNotFound { message_id: message_id.to_string() }
+    }
+
+    /// Convert StorageError to a cloneable version by converting io::Error to String
+    ///
+    /// This method converts the error to a form that can be cloned, which is useful
+    /// when you need to share errors across threads or store them in structures
+    /// that require Clone.
+    #[must_use]
+    pub fn to_cloneable(&self) -> CloneableStorageError {
+        match self {
+            Self::IoError { operation, source } => CloneableStorageError::IoError {
+                operation: operation.clone(),
+                error_message: source.to_string(),
+            },
+            _ => CloneableStorageError::Other(format!("{}", self)),
+        }
     }
 }
+
+/// A cloneable version of StorageError
+///
+/// This type can be used when you need to clone storage errors,
+/// particularly when dealing with io::Error which doesn't implement Clone.
+#[derive(Debug, Clone)]
+pub enum CloneableStorageError {
+    /// I/O error with error message as string
+    IoError {
+        /// Operation during which I/O error occurred
+        operation: String,
+        /// String representation of the I/O error
+        error_message: String,
+    },
+    /// Other errors as formatted strings
+    Other(String),
+}
+
+impl fmt::Display for CloneableStorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IoError { operation, error_message } => {
+                write!(f, "I/O error during {}: {}", operation, error_message)
+            },
+            Self::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for CloneableStorageError {}
 
 /// Error severity levels for monitoring and alerting
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ErrorSeverity {
-    /// Low severity - individual request failures
+    /// Low severity - operational issues that don't affect functionality
     Low,
-    /// Medium severity - operational issues affecting multiple requests
+    /// Medium severity - degraded performance or partial failures
     Medium,
-    /// High severity - system-wide issues affecting availability
+    /// High severity - significant operational impact
     High,
-    /// Critical severity - data integrity or system stability issues
+    /// Critical severity - system failure or data integrity issues
     Critical,
 }
 
 impl fmt::Display for ErrorSeverity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let level = match self {
-            Self::Low => "LOW",
-            Self::Medium => "MEDIUM",
-            Self::High => "HIGH",
-            Self::Critical => "CRITICAL",
-        };
-        write!(f, "{level}")
-    }
-}
-
-/// Convert from bincode errors
-impl From<bincode::Error> for StorageError {
-    fn from(err: bincode::Error) -> Self {
-        match *err {
-            bincode::ErrorKind::Io(io_err) => Self::io_error("serialization", io_err),
-            _ => Self::serialization_error(format!("bincode error: {err}")),
+        match self {
+            Self::Low => write!(f, "LOW"),
+            Self::Medium => write!(f, "MEDIUM"),
+            Self::High => write!(f, "HIGH"),
+            Self::Critical => write!(f, "CRITICAL"),
         }
     }
 }
 
-/// Convert from standard I/O errors
-impl From<io::Error> for StorageError {
-    fn from(err: io::Error) -> Self {
-        Self::io_error("file operation", err)
+/// Error recovery strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryStrategy {
+    /// Retry the operation
+    Retry,
+    /// Fallback to alternative approach
+    Fallback,
+    /// Abort the operation
+    Abort,
+    /// Escalate to higher level
+    Escalate,
+}
+
+impl StorageError {
+    /// Get recommended recovery strategy for this error
+    ///
+    /// # Returns
+    ///
+    /// Recommended recovery strategy based on error type and context.
+    #[must_use]
+    pub fn recovery_strategy(&self) -> RecoveryStrategy {
+        match self {
+            // Transient errors can be retried
+            Self::OperationTimeout { .. }
+            | Self::LockAcquisitionFailed { .. }
+            | Self::ResourceExhausted { .. } => RecoveryStrategy::Retry,
+
+            // Network and replication issues may have fallbacks
+            Self::NetworkPartition { .. }
+            | Self::ReplicationFailed { .. }
+            | Self::BackendUnavailable { .. } => RecoveryStrategy::Fallback,
+
+            // Data corruption and critical errors need escalation
+            Self::DataCorrupted { .. }
+            | Self::MessageCorrupted { .. }
+            | Self::InternalError { .. } => RecoveryStrategy::Escalate,
+
+            // Configuration and permanent errors should abort
+            Self::ConfigurationError { .. }
+            | Self::AuthorizationFailed { .. }
+            | Self::VersionMismatch { .. }
+            | Self::OperationNotSupported { .. } => RecoveryStrategy::Abort,
+
+            // Most other errors can be retried initially
+            _ => RecoveryStrategy::Retry,
+        }
     }
 }
 
@@ -466,41 +700,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_error_classification() {
-        let timeout_error = StorageError::OperationTimeout {
-            operation: "write".to_string(),
-            duration_ms: 5000,
-        };
+    fn test_error_creation() {
+        let fs_error = StorageError::file_system_error("write", "/tmp/test", "permission denied");
+        if let StorageError::FileSystemError { operation, path, reason } = fs_error {
+            assert_eq!(operation, "write");
+            assert_eq!(path, "/tmp/test");
+            assert_eq!(reason, "permission denied");
+        } else {
+            panic!("Expected FileSystemError variant");
+        }
 
-        assert!(timeout_error.is_transient());
-        assert!(!timeout_error.is_corruption());
-        assert!(!timeout_error.is_capacity_related());
-        assert_eq!(timeout_error.severity(), ErrorSeverity::Low);
-
-        let corruption_error = StorageError::MessageCorrupted {
-            offset: 1234,
-            details: "checksum mismatch".to_string(),
-        };
-
-        assert!(!corruption_error.is_transient());
-        assert!(corruption_error.is_corruption());
-        assert!(!corruption_error.is_capacity_related());
-        assert_eq!(corruption_error.severity(), ErrorSeverity::Critical);
-
-        let capacity_error = StorageError::CapacityExceeded { used: 1000, capacity: 800 };
-
-        assert!(!capacity_error.is_transient());
-        assert!(!capacity_error.is_corruption());
-        assert!(capacity_error.is_capacity_related());
-        assert_eq!(capacity_error.severity(), ErrorSeverity::High);
-    }
-
-    #[test]
-    fn test_error_creation_helpers() {
-        let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
-        let storage_err = StorageError::io_error("read", io_err);
-
-        if let StorageError::IoError { operation, .. } = storage_err {
+        let io_error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let storage_error = StorageError::io_error("read", io_error);
+        if let StorageError::IoError { operation, .. } = storage_error {
             assert_eq!(operation, "read");
         } else {
             panic!("Expected IoError variant");
@@ -520,6 +732,44 @@ mod tests {
         } else {
             panic!("Expected DeserializationError variant");
         }
+
+        let tx_err = StorageError::transaction_failed(123, "timeout");
+        if let StorageError::TransactionFailed { transaction_id, reason } = tx_err {
+            assert_eq!(transaction_id, 123);
+            assert_eq!(reason, "timeout");
+        } else {
+            panic!("Expected TransactionFailed variant");
+        }
+
+        let replay_err = StorageError::replay_error("session not found");
+        if let StorageError::ReplayError { reason } = replay_err {
+            assert_eq!(reason, "session not found");
+        } else {
+            panic!("Expected ReplayError variant");
+        }
+
+        let msg_err = StorageError::message_not_found("msg-123");
+        if let StorageError::MessageNotFound { message_id } = msg_err {
+            assert_eq!(message_id, "msg-123");
+        } else {
+            panic!("Expected MessageNotFound variant");
+        }
+    }
+
+    #[test]
+    fn test_cloneable_conversion() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let storage_error = StorageError::io_error("read", io_error);
+
+        let cloneable = storage_error.to_cloneable();
+        let cloned = cloneable.clone();
+
+        if let CloneableStorageError::IoError { operation, error_message } = cloned {
+            assert_eq!(operation, "read");
+            assert!(error_message.contains("access denied"));
+        } else {
+            panic!("Expected IoError variant in cloneable");
+        }
     }
 
     #[test]
@@ -531,14 +781,47 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let error = StorageError::WriteFailed {
-            offset: 1234,
-            reason: "disk full".to_string(),
-        };
+        let error = StorageError::WriteFailed { offset: 1234, reason: "disk full".to_string() };
 
         let error_string = format!("{error}");
         assert!(error_string.contains("Write operation failed"));
         assert!(error_string.contains("1234"));
         assert!(error_string.contains("disk full"));
+
+        let seq_error = StorageError::SequenceNotFound { sequence: 99 };
+        let seq_string = format!("{seq_error}");
+        assert!(seq_string.contains("Sequence number 99 not found"));
+
+        let offset_error = StorageError::InvalidOffset { offset: 2000, segment_size: 1000 };
+        let offset_string = format!("{offset_error}");
+        assert!(offset_string.contains("Invalid offset: 2000 exceeds segment size 1000"));
+
+        let msg_error = StorageError::MessageNotFound { message_id: "msg-456".to_string() };
+        let msg_string = format!("{msg_error}");
+        assert!(msg_string.contains("Message with ID msg-456 not found"));
+    }
+
+    #[test]
+    fn test_recovery_strategies() {
+        assert_eq!(
+            StorageError::OperationTimeout { operation: "write".to_string(), duration_ms: 1000 }
+                .recovery_strategy(),
+            RecoveryStrategy::Retry
+        );
+
+        assert_eq!(
+            StorageError::DataCorrupted { offset: 0, details: "checksum mismatch".to_string() }
+                .recovery_strategy(),
+            RecoveryStrategy::Escalate
+        );
+
+        assert_eq!(
+            StorageError::ConfigurationError {
+                parameter: "max_size".to_string(),
+                reason: "negative value".to_string(),
+            }
+            .recovery_strategy(),
+            RecoveryStrategy::Abort
+        );
     }
 }

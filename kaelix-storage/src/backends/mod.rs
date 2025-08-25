@@ -6,8 +6,10 @@
 #[cfg(feature = "memory-backend")]
 pub mod memory;
 
-#[cfg(feature = "file-backend")]
-pub mod file;
+// File backend will be implemented in future phases
+// #[cfg(feature = "file-backend")]
+// pub mod file;
 
-#[cfg(feature = "distributed-backend")]
-pub mod distributed;
+// Distributed backend will be implemented in future phases
+// #[cfg(feature = "distributed-backend")]
+// pub mod distributed;

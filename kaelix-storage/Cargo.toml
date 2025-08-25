@@ -14,8 +14,6 @@ categories.workspace = true
 description = "Ultra-high-performance distributed storage engine for MemoryStreamer"
 
 [dependencies]
-tempfile = "3.4.0"
-tokio = { version = "1.35.1", features = ["full", "test-util"] }
 # Internal crates
 kaelix-core = { path = "../kaelix-core" }
 kaelix-cluster = { path = "../kaelix-cluster" }
@@ -61,12 +59,22 @@ crc32fast = { workspace = true }
 # File system operations
 tempfile = { workspace = true }
 
+# Compression and checksums for segment storage
+lz4_flex = "0.11"
+crc32c = "0.6"
+
 [dev-dependencies]
 tokio-test = { workspace = true }
 criterion = { workspace = true }
 proptest = { workspace = true }
 test-case = { workspace = true }
 rstest = { workspace = true }
+# Additional dependencies for benchmarks
+rand = "0.8"
+
+[[bench]]
+name = "wal_benchmarks"
+harness = false
 
 [features]
 default = ["memory-backend"]

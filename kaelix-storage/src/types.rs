@@ -6,9 +6,7 @@
 //! minimal serialization overhead.
 
 use crate::error::{StorageError, StorageResult};
-use kaelix_cluster::{
-    messages::ClusterMessage, time::HybridLogicalClock, types::NodeId,
-};
+use kaelix_cluster::{messages::ClusterMessage, time::HybridLogicalClock, types::NodeId};
 use serde::{Deserialize, Serialize};
 use std::{fmt, time::Duration};
 
@@ -71,7 +69,11 @@ impl LogOffset {
     /// The absolute difference between the offsets.
     #[must_use]
     pub const fn distance(&self, other: &LogOffset) -> u64 {
-        if self.0 >= other.0 { self.0 - other.0 } else { other.0 - self.0 }
+        if self.0 >= other.0 {
+            self.0 - other.0
+        } else {
+            other.0 - self.0
+        }
     }
 
     /// Check if this offset is immediately after another
@@ -549,21 +551,13 @@ impl BatchWriteResult {
     #[must_use]
     pub fn success(message_results: Vec<WriteResult>) -> Self {
         let messages_written = message_results.len();
-        let total_bytes_written = message_results
-            .iter()
-            .map(|r| u64::from(r.bytes_written))
-            .sum();
-        let total_latency = message_results
-            .iter()
-            .map(|r| r.latency)
-            .max()
-            .unwrap_or(Duration::ZERO);
+        let total_bytes_written = message_results.iter().map(|r| u64::from(r.bytes_written)).sum();
+        let total_latency =
+            message_results.iter().map(|r| r.latency).max().unwrap_or(Duration::ZERO);
         let average_latency = if messages_written > 0 {
             Duration::from_nanos(
-                message_results
-                    .iter()
-                    .map(|r| r.latency.as_nanos() as u64)
-                    .sum::<u64>() / messages_written as u64,
+                message_results.iter().map(|r| r.latency.as_nanos() as u64).sum::<u64>()
+                    / messages_written as u64,
             )
         } else {
             Duration::ZERO
@@ -593,10 +587,7 @@ impl BatchWriteResult {
     #[must_use]
     pub fn failure(partial_results: Vec<WriteResult>, error: StorageError) -> Self {
         let messages_written = partial_results.len();
-        let total_bytes_written = partial_results
-            .iter()
-            .map(|r| u64::from(r.bytes_written))
-            .sum();
+        let total_bytes_written = partial_results.iter().map(|r| u64::from(r.bytes_written)).sum();
 
         Self {
             message_results: partial_results,
@@ -631,17 +622,9 @@ mod tests {
     fn test_storage_message_creation() {
         let node_id = NodeId::generate();
         let dest_id = NodeId::generate();
-        let cluster_msg = ClusterMessage::new(
-            node_id,
-            dest_id,
-            MessagePayload::HealthCheck,
-        );
+        let cluster_msg = ClusterMessage::new(node_id, dest_id, MessagePayload::HealthCheck);
 
-        let storage_msg = StorageMessage::new(
-            cluster_msg.clone(),
-            node_id,
-            LogOffset::new(42),
-        );
+        let storage_msg = StorageMessage::new(cluster_msg.clone(), node_id, LogOffset::new(42));
 
         assert_eq!(storage_msg.offset, LogOffset::new(42));
         assert_eq!(storage_msg.stored_by, node_id);

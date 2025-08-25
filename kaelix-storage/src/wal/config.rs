@@ -1,485 +1,216 @@
-//! WAL configuration and settings
-//!
-//! This module provides comprehensive configuration options for the Write-Ahead Log,
-//! allowing fine-tuning of performance, durability, and operational characteristics.
-
+use serde::{Deserialize, Serialize, Deserializer, Serializer};
 use std::{path::PathBuf, time::Duration};
 
 /// WAL Configuration with performance and durability tuning options
 ///
 /// Provides extensive configuration options for optimizing WAL performance
 /// based on specific deployment scenarios and requirements.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalConfig {
     /// Directory for WAL files
     pub wal_dir: PathBuf,
 
     /// Maximum size per segment in bytes (default: 64MB)
-    pub max_segment_size: u64,
+    pub segment_size: u64,
 
-    /// Maximum age of a segment before rotation (default: 1 hour)
-    pub max_segment_age: Duration,
-
-    /// Maximum batch size for batch operations (default: 1000)
-    pub max_batch_size: usize,
-
-    /// Maximum time to wait before flushing a batch (default: 1ms)
-    pub batch_timeout: Duration,
-
-    /// Durability and synchronization policy
+    /// Sync policy for durability vs performance trade-offs
     pub sync_policy: SyncPolicy,
 
-    /// Enable memory-mapped I/O for maximum performance (default: true)
-    pub use_memory_mapping: bool,
+    /// Enable memory-mapped I/O for segments
+    pub use_mmap: bool,
 
-    /// Enable direct I/O to bypass page cache (default: false)
-    pub use_direct_io: bool,
+    /// Buffer size for write operations (default: 8KB)
+    pub buffer_size: u64,
 
-    /// Buffer size for I/O operations in bytes (default: 4MB)
-    pub buffer_size: usize,
+    /// Maximum batch size before forced flush (default: 1000 entries)
+    pub max_batch_size: u64,
+
+    /// Maximum time to wait before forced flush
+    #[serde(with = "duration_millis")]
+    pub max_batch_wait: Duration,
+
+    /// Enable compression for segment data
+    pub enable_compression: bool,
+
+    /// Compression algorithm to use
+    pub compression_algorithm: CompressionAlgorithm,
+
+    /// Level of compression to apply (0-9, higher = more compression)
+    pub compression_level: u32,
+
+    /// Number of background threads for async operations (default: 2)
+    pub async_threads: u32,
+
+    /// Enable asynchronous writes to reduce blocking
+    pub async_writes: bool,
+
+    /// Rotation configuration
+    pub rotation: super::rotation::RotationConfig,
 }
 
-/// Synchronization policy for durability guarantees
-///
-/// Defines when and how the WAL performs fsync operations to ensure
-/// data durability with different performance trade-offs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Synchronization policy for write operations
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SyncPolicy {
-    /// Never perform fsync - maximum performance, no durability guarantee
+    /// No explicit sync calls (OS decides when to flush)
     Never,
-
-    /// Fsync after each batch - good balance of performance and durability
-    OnBatch,
-
-    /// Fsync at regular intervals - configurable durability with good performance
-    Interval(Duration),
-
-    /// Fsync only on explicit flush or shutdown - manual durability control
-    OnShutdown,
-
-    /// Fsync after every write - maximum durability, lowest performance
+    /// Sync on each write (slowest, most durable)
     Always,
+    /// Sync on each batch write
+    OnBatch,
+    /// Sync at regular intervals
+    Interval(#[serde(with = "duration_millis")] Duration),
+    /// Sync only on shutdown
+    OnShutdown,
+}
+
+/// Compression algorithms supported by WAL
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum CompressionAlgorithm {
+    /// No compression
+    None,
+    /// LZ4 (fast compression/decompression)
+    Lz4,
+    /// Zstd (balanced compression ratio and speed)
+    Zstd,
+    /// Gzip (high compression ratio, slower)
+    Gzip,
+}
+
+/// Serialize/deserialize Duration as milliseconds
+mod duration_millis {
+    use super::*;
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(duration.as_millis() as u64)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = <u64 as Deserialize>::deserialize(deserializer)?;
+        Ok(Duration::from_millis(millis))
+    }
 }
 
 impl Default for WalConfig {
-    /// Create a default WAL configuration optimized for high performance
     fn default() -> Self {
         Self {
             wal_dir: PathBuf::from("./wal"),
-            max_segment_size: 64 * 1024 * 1024, // 64MB
-            max_segment_age: Duration::from_secs(3600), // 1 hour
-            max_batch_size: 1000,
-            batch_timeout: Duration::from_millis(1),
+            segment_size: 64 * 1024 * 1024, // 64MB
             sync_policy: SyncPolicy::OnBatch,
-            use_memory_mapping: true,
-            use_direct_io: false,
-            buffer_size: 4 * 1024 * 1024, // 4MB
+            use_mmap: true,
+            buffer_size: 8 * 1024, // 8KB
+            max_batch_size: 1000,
+            max_batch_wait: Duration::from_millis(10),
+            enable_compression: false,
+            compression_algorithm: CompressionAlgorithm::Lz4,
+            compression_level: 1,
+            async_threads: 2,
+            async_writes: true,
+            rotation: super::rotation::RotationConfig::default(),
         }
     }
 }
 
 impl WalConfig {
-    /// Create a new WAL configuration with the specified directory
-    ///
-    /// # Parameters
-    ///
-    /// * `wal_dir` - Directory path for WAL files
-    ///
-    /// # Returns
-    ///
-    /// A new [`WalConfig`] with default settings and the specified directory.
-    pub fn new<P: Into<PathBuf>>(wal_dir: P) -> Self {
+    /// Create a new WAL configuration optimized for high performance
+    pub fn high_performance() -> Self {
         Self {
-            wal_dir: wal_dir.into(),
+            sync_policy: SyncPolicy::OnBatch,
+            use_mmap: true,
+            buffer_size: 64 * 1024, // 64KB
+            max_batch_size: 10000,
+            max_batch_wait: Duration::from_millis(1), // 1ms
+            enable_compression: false,
+            async_writes: true,
+            async_threads: 4,
             ..Default::default()
         }
     }
 
-    /// Create a configuration optimized for maximum performance
-    ///
-    /// - Never syncs to disk (no durability guarantee)
-    /// - Large batches for high throughput
-    /// - Memory mapping enabled
-    /// - Minimal batch timeout
-    ///
-    /// # Parameters
-    ///
-    /// * `wal_dir` - Directory path for WAL files
-    ///
-    /// # Returns
-    ///
-    /// Performance-optimized [`WalConfig`].
-    pub fn performance_optimized<P: Into<PathBuf>>(wal_dir: P) -> Self {
+    /// Create a new WAL configuration optimized for maximum durability
+    pub fn max_durability() -> Self {
         Self {
-            wal_dir: wal_dir.into(),
-            max_segment_size: 128 * 1024 * 1024, // 128MB for fewer rotations
-            max_segment_age: Duration::from_secs(7200), // 2 hours
-            max_batch_size: 10000, // Large batches
-            batch_timeout: Duration::from_micros(100), // Very short timeout
-            sync_policy: SyncPolicy::Never, // No fsync
-            use_memory_mapping: true,
-            use_direct_io: false,
-            buffer_size: 8 * 1024 * 1024, // 8MB buffer
+            sync_policy: SyncPolicy::Always,
+            use_mmap: false,
+            buffer_size: 4 * 1024, // 4KB
+            max_batch_size: 100,
+            max_batch_wait: Duration::from_millis(1),
+            enable_compression: true,
+            compression_algorithm: CompressionAlgorithm::Zstd,
+            compression_level: 3,
+            async_writes: false,
+            async_threads: 1,
+            ..Default::default()
         }
     }
 
-    /// Create a configuration optimized for durability
-    ///
-    /// - Syncs frequently for maximum durability
-    /// - Smaller segments for faster recovery
-    /// - Conservative batch sizes
-    /// - Direct I/O for immediate persistence
-    ///
-    /// # Parameters
-    ///
-    /// * `wal_dir` - Directory path for WAL files
-    ///
-    /// # Returns
-    ///
-    /// Durability-optimized [`WalConfig`].
-    pub fn durability_optimized<P: Into<PathBuf>>(wal_dir: P) -> Self {
+    /// Create a new WAL configuration optimized for space efficiency
+    pub fn space_efficient() -> Self {
         Self {
-            wal_dir: wal_dir.into(),
-            max_segment_size: 32 * 1024 * 1024, // 32MB for faster recovery
-            max_segment_age: Duration::from_secs(1800), // 30 minutes
-            max_batch_size: 100, // Smaller batches
-            batch_timeout: Duration::from_millis(5), // Quick flush
-            sync_policy: SyncPolicy::OnBatch, // Sync after every batch
-            use_memory_mapping: false, // Disable mmap for immediate writes
-            use_direct_io: true, // Bypass page cache
-            buffer_size: 1024 * 1024, // 1MB buffer
+            sync_policy: SyncPolicy::Interval(Duration::from_millis(100)),
+            use_mmap: true,
+            enable_compression: true,
+            compression_algorithm: CompressionAlgorithm::Zstd,
+            compression_level: 6,
+            segment_size: 32 * 1024 * 1024, // 32MB
+            ..Default::default()
         }
     }
 
-    /// Create a configuration balanced between performance and durability
-    ///
-    /// - Periodic syncing for reasonable durability
-    /// - Medium-sized batches and segments
-    /// - Memory mapping enabled with periodic sync
-    ///
-    /// # Parameters
-    ///
-    /// * `wal_dir` - Directory path for WAL files
-    ///
-    /// # Returns
-    ///
-    /// Balanced [`WalConfig`].
-    pub fn balanced<P: Into<PathBuf>>(wal_dir: P) -> Self {
-        Self {
-            wal_dir: wal_dir.into(),
-            max_segment_size: 64 * 1024 * 1024, // 64MB
-            max_segment_age: Duration::from_secs(3600), // 1 hour
-            max_batch_size: 1000,
-            batch_timeout: Duration::from_millis(1),
-            sync_policy: SyncPolicy::Interval(Duration::from_millis(100)), // Sync every 100ms
-            use_memory_mapping: true,
-            use_direct_io: false,
-            buffer_size: 4 * 1024 * 1024, // 4MB
-        }
-    }
-
-    /// Create a configuration optimized for development/testing
-    ///
-    /// - Small segments for quick testing
-    /// - Frequent rotation for testing rotation logic
-    /// - No memory mapping to avoid test artifacts
-    /// - Fast sync for quick test completion
-    ///
-    /// # Parameters
-    ///
-    /// * `wal_dir` - Directory path for WAL files
-    ///
-    /// # Returns
-    ///
-    /// Development-optimized [`WalConfig`].
-    pub fn development<P: Into<PathBuf>>(wal_dir: P) -> Self {
-        Self {
-            wal_dir: wal_dir.into(),
-            max_segment_size: 1024 * 1024, // 1MB for quick rotation
-            max_segment_age: Duration::from_secs(60), // 1 minute
-            max_batch_size: 10, // Small batches
-            batch_timeout: Duration::from_millis(10),
-            sync_policy: SyncPolicy::OnBatch,
-            use_memory_mapping: false, // Avoid mmap in tests
-            use_direct_io: false,
-            buffer_size: 64 * 1024, // 64KB buffer
-        }
-    }
-
-    /// Validate the configuration for correctness
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if configuration is valid, `Err(String)` with error description otherwise.
+    /// Validate configuration parameters
     pub fn validate(&self) -> Result<(), String> {
-        // Validate directory path
-        if self.wal_dir.as_os_str().is_empty() {
-            return Err("WAL directory path cannot be empty".to_string());
+        if self.segment_size == 0 {
+            return Err("Segment size must be greater than 0".to_string());
         }
 
-        // Validate segment size
-        if self.max_segment_size == 0 {
-            return Err("Maximum segment size must be greater than 0".to_string());
-        }
-
-        if self.max_segment_size < 1024 {
-            return Err("Maximum segment size should be at least 1KB".to_string());
-        }
-
-        // Validate batch settings
-        if self.max_batch_size == 0 {
-            return Err("Maximum batch size must be greater than 0".to_string());
-        }
-
-        if self.max_batch_size > 100_000 {
-            return Err("Maximum batch size should not exceed 100,000 entries".to_string());
-        }
-
-        // Validate timeout
-        if self.batch_timeout.is_zero() {
-            return Err("Batch timeout must be greater than 0".to_string());
-        }
-
-        // Validate buffer size
         if self.buffer_size == 0 {
             return Err("Buffer size must be greater than 0".to_string());
         }
 
-        if self.buffer_size < 4096 {
-            return Err("Buffer size should be at least 4KB for efficiency".to_string());
+        if self.max_batch_size == 0 {
+            return Err("Max batch size must be greater than 0".to_string());
         }
 
-        // Validate segment age
-        if self.max_segment_age.is_zero() {
-            return Err("Maximum segment age must be greater than 0".to_string());
+        if self.async_threads == 0 {
+            return Err("Async threads must be greater than 0".to_string());
         }
 
-        // Validate sync policy
-        if let SyncPolicy::Interval(interval) = self.sync_policy {
-            if interval.is_zero() {
-                return Err("Sync interval must be greater than 0".to_string());
-            }
+        if self.compression_level > 9 {
+            return Err("Compression level must be between 0 and 9".to_string());
+        }
+
+        // Validate directory exists or can be created
+        if !self.wal_dir.exists() && std::fs::create_dir_all(&self.wal_dir).is_err() {
+            return Err(format!("Cannot create WAL directory: {}", self.wal_dir.display()));
         }
 
         Ok(())
     }
 
-    /// Set the WAL directory
-    ///
-    /// # Parameters
-    ///
-    /// * `dir` - New directory path
-    ///
-    /// # Returns
-    ///
-    /// Modified configuration for method chaining.
-    pub fn with_wal_dir<P: Into<PathBuf>>(mut self, dir: P) -> Self {
-        self.wal_dir = dir.into();
-        self
-    }
-
-    /// Set the maximum segment size
-    ///
-    /// # Parameters
-    ///
-    /// * `size` - Maximum segment size in bytes
-    ///
-    /// # Returns
-    ///
-    /// Modified configuration for method chaining.
-    pub fn with_max_segment_size(mut self, size: u64) -> Self {
-        self.max_segment_size = size;
-        self
-    }
-
-    /// Set the maximum segment age
-    ///
-    /// # Parameters
-    ///
-    /// * `age` - Maximum segment age duration
-    ///
-    /// # Returns
-    ///
-    /// Modified configuration for method chaining.
-    pub fn with_max_segment_age(mut self, age: Duration) -> Self {
-        self.max_segment_age = age;
-        self
-    }
-
-    /// Set the maximum batch size
-    ///
-    /// # Parameters
-    ///
-    /// * `size` - Maximum number of entries per batch
-    ///
-    /// # Returns
-    ///
-    /// Modified configuration for method chaining.
-    pub fn with_max_batch_size(mut self, size: usize) -> Self {
-        self.max_batch_size = size;
-        self
-    }
-
-    /// Set the batch timeout
-    ///
-    /// # Parameters
-    ///
-    /// * `timeout` - Maximum time to wait before flushing a batch
-    ///
-    /// # Returns
-    ///
-    /// Modified configuration for method chaining.
-    pub fn with_batch_timeout(mut self, timeout: Duration) -> Self {
-        self.batch_timeout = timeout;
-        self
-    }
-
-    /// Set the sync policy
-    ///
-    /// # Parameters
-    ///
-    /// * `policy` - Synchronization policy for durability
-    ///
-    /// # Returns
-    ///
-    /// Modified configuration for method chaining.
-    pub fn with_sync_policy(mut self, policy: SyncPolicy) -> Self {
-        self.sync_policy = policy;
-        self
-    }
-
-    /// Enable or disable memory mapping
-    ///
-    /// # Parameters
-    ///
-    /// * `enabled` - Whether to enable memory-mapped I/O
-    ///
-    /// # Returns
-    ///
-    /// Modified configuration for method chaining.
-    pub fn with_memory_mapping(mut self, enabled: bool) -> Self {
-        self.use_memory_mapping = enabled;
-        self
-    }
-
-    /// Enable or disable direct I/O
-    ///
-    /// # Parameters
-    ///
-    /// * `enabled` - Whether to enable direct I/O
-    ///
-    /// # Returns
-    ///
-    /// Modified configuration for method chaining.
-    pub fn with_direct_io(mut self, enabled: bool) -> Self {
-        self.use_direct_io = enabled;
-        self
-    }
-
-    /// Set the buffer size
-    ///
-    /// # Parameters
-    ///
-    /// * `size` - Buffer size in bytes
-    ///
-    /// # Returns
-    ///
-    /// Modified configuration for method chaining.
-    pub fn with_buffer_size(mut self, size: usize) -> Self {
-        self.buffer_size = size;
-        self
-    }
-
-    /// Get estimated memory usage for this configuration
-    ///
-    /// # Returns
-    ///
-    /// Estimated memory usage in bytes.
-    #[must_use]
-    pub fn estimated_memory_usage(&self) -> usize {
-        let mut usage = 0;
-
-        // Buffer memory
-        usage += self.buffer_size;
-
-        // Batch buffer (rough estimate)
-        usage += self.max_batch_size * 1024; // Assume 1KB per entry
-
-        // Memory mapping overhead (if enabled)
-        if self.use_memory_mapping {
-            usage += self.max_segment_size as usize;
-        }
-
-        // Base WAL structure overhead
-        usage += 8192; // Rough estimate
-
-        usage
-    }
-
-    /// Get estimated disk space usage per day
-    ///
-    /// # Parameters
-    ///
-    /// * `messages_per_second` - Expected message rate
-    /// * `avg_message_size` - Average message size in bytes
-    ///
-    /// # Returns
-    ///
-    /// Estimated disk usage per day in bytes.
-    #[must_use]
-    pub fn estimated_daily_disk_usage(&self, messages_per_second: u64, avg_message_size: usize) -> u64 {
-        let seconds_per_day = 24 * 60 * 60;
-        let messages_per_day = messages_per_second * seconds_per_day;
-        let header_size = 24; // Fixed header size
-        let entry_size = header_size + avg_message_size;
-        
-        messages_per_day * entry_size as u64
-    }
-}
-
-impl SyncPolicy {
-    /// Check if this policy requires immediate synchronization
-    #[must_use]
-    pub fn is_immediate(&self) -> bool {
-        matches!(self, Self::Always)
-    }
-
-    /// Check if this policy never synchronizes
-    #[must_use]
-    pub fn is_never(&self) -> bool {
-        matches!(self, Self::Never)
-    }
-
-    /// Get the sync interval if applicable
-    #[must_use]
-    pub fn interval(&self) -> Option<Duration> {
-        match self {
-            Self::Interval(duration) => Some(*duration),
-            _ => None,
+    /// Get recommended buffer size based on configuration
+    pub fn effective_buffer_size(&self) -> u64 {
+        match self.sync_policy {
+            SyncPolicy::Always => self.buffer_size.min(4 * 1024), // Cap at 4KB for frequent syncs
+            SyncPolicy::OnBatch => self.buffer_size,
+            SyncPolicy::Interval(_) => self.buffer_size.max(16 * 1024), // Min 16KB for interval syncs
+            SyncPolicy::Never => self.buffer_size.max(32 * 1024), // Min 32KB for no syncs
+            SyncPolicy::OnShutdown => self.buffer_size.max(64 * 1024), // Min 64KB for shutdown-only syncs
         }
     }
 
-    /// Get a human-readable description of the policy
-    #[must_use]
-    pub fn description(&self) -> &'static str {
-        match self {
-            Self::Never => "Never sync (maximum performance, no durability)",
-            Self::OnBatch => "Sync after each batch (balanced performance/durability)",
-            Self::Interval(_) => "Sync at regular intervals (configurable durability)",
-            Self::OnShutdown => "Sync only on shutdown (manual durability control)",
-            Self::Always => "Sync after every write (maximum durability)",
-        }
-    }
-}
-
-impl std::fmt::Display for SyncPolicy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Never => write!(f, "Never"),
-            Self::OnBatch => write!(f, "OnBatch"),
-            Self::Interval(duration) => write!(f, "Interval({}ms)", duration.as_millis()),
-            Self::OnShutdown => write!(f, "OnShutdown"),
-            Self::Always => write!(f, "Always"),
+    /// Get recommended batch size based on configuration
+    pub fn effective_batch_size(&self) -> u64 {
+        match self.sync_policy {
+            SyncPolicy::Always => self.max_batch_size.min(100), // Small batches for frequent syncs
+            SyncPolicy::OnBatch => self.max_batch_size,
+            SyncPolicy::Interval(_) => self.max_batch_size,
+            SyncPolicy::Never => self.max_batch_size.max(1000), // Larger batches for no syncs
+            SyncPolicy::OnShutdown => self.max_batch_size.max(5000), // Larger batches for shutdown-only syncs
         }
     }
 }
@@ -492,147 +223,126 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = WalConfig::default();
-        
-        assert_eq!(config.wal_dir, PathBuf::from("./wal"));
-        assert_eq!(config.max_segment_size, 64 * 1024 * 1024);
-        assert_eq!(config.max_segment_age, Duration::from_secs(3600));
-        assert_eq!(config.max_batch_size, 1000);
-        assert_eq!(config.batch_timeout, Duration::from_millis(1));
-        assert_eq!(config.sync_policy, SyncPolicy::OnBatch);
-        assert!(config.use_memory_mapping);
-        assert!(!config.use_direct_io);
-        assert_eq!(config.buffer_size, 4 * 1024 * 1024);
+        assert!(config.validate().is_ok());
+        assert!(matches!(config.sync_policy, SyncPolicy::OnBatch));
+        assert!(config.use_mmap);
+        assert!(!config.enable_compression);
+    }
+
+    #[test]
+    fn test_high_performance_config() {
+        let config = WalConfig::high_performance();
+        assert!(config.validate().is_ok());
+        assert!(matches!(config.sync_policy, SyncPolicy::OnBatch));
+        assert!(config.async_writes);
+        assert_eq!(config.async_threads, 4);
+    }
+
+    #[test]
+    fn test_max_durability_config() {
+        let config = WalConfig::max_durability();
+        assert!(config.validate().is_ok());
+        assert!(matches!(config.sync_policy, SyncPolicy::Always));
+        assert!(!config.async_writes);
+        assert!(config.enable_compression);
+    }
+
+    #[test]
+    fn test_space_efficient_config() {
+        let config = WalConfig::space_efficient();
+        assert!(config.validate().is_ok());
+        assert!(config.enable_compression);
+        assert!(matches!(config.compression_algorithm, CompressionAlgorithm::Zstd));
+        assert_eq!(config.compression_level, 6);
+        if let SyncPolicy::Interval(duration) = config.sync_policy {
+            assert_eq!(duration, Duration::from_millis(100));
+        } else {
+            panic!("Expected Interval sync policy");
+        }
     }
 
     #[test]
     fn test_config_validation() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = WalConfig::new(temp_dir.path());
+        let mut config = WalConfig::default();
         assert!(config.validate().is_ok());
 
-        // Test invalid configurations
-        let invalid_config = WalConfig {
-            max_segment_size: 0,
-            ..config.clone()
-        };
-        assert!(invalid_config.validate().is_err());
+        config.segment_size = 0;
+        assert!(config.validate().is_err());
 
-        let invalid_config = WalConfig {
-            max_batch_size: 0,
-            ..config.clone()
-        };
-        assert!(invalid_config.validate().is_err());
+        config.segment_size = 1024;
+        config.buffer_size = 0;
+        assert!(config.validate().is_err());
 
-        let invalid_config = WalConfig {
-            buffer_size: 0,
-            ..config
-        };
-        assert!(invalid_config.validate().is_err());
+        config.buffer_size = 1024;
+        config.max_batch_size = 0;
+        assert!(config.validate().is_err());
+
+        config.max_batch_size = 100;
+        config.compression_level = 10;
+        assert!(config.validate().is_err());
     }
 
     #[test]
-    fn test_performance_optimized_config() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = WalConfig::performance_optimized(temp_dir.path());
+    fn test_effective_sizes() {
+        let mut config = WalConfig::default();
+        config.buffer_size = 16 * 1024;
+        config.max_batch_size = 500;
+
+        config.sync_policy = SyncPolicy::Always;
+        assert_eq!(config.effective_buffer_size(), 4 * 1024);
+        assert_eq!(config.effective_batch_size(), 100);
+
+        config.sync_policy = SyncPolicy::OnBatch;
+        assert_eq!(config.effective_buffer_size(), 16 * 1024);
+        assert_eq!(config.effective_batch_size(), 500);
+
+        config.sync_policy = SyncPolicy::Never;
+        assert!(config.effective_buffer_size() >= 32 * 1024);
+        assert!(config.effective_batch_size() >= 1000);
+    }
+
+    #[test]
+    fn test_serialization() {
+        let config = WalConfig::default();
+        let serialized = serde_json::to_string(&config).unwrap();
+        let deserialized: WalConfig = serde_json::from_str(&serialized).unwrap();
         
-        assert_eq!(config.sync_policy, SyncPolicy::Never);
-        assert!(config.use_memory_mapping);
-        assert_eq!(config.max_batch_size, 10000);
+        assert_eq!(config.segment_size, deserialized.segment_size);
+        assert_eq!(config.buffer_size, deserialized.buffer_size);
+        assert_eq!(config.max_batch_wait, deserialized.max_batch_wait);
+    }
+
+    #[test]
+    fn test_directory_validation() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = WalConfig::default();
+        config.wal_dir = temp_dir.path().to_path_buf();
+        
         assert!(config.validate().is_ok());
     }
 
     #[test]
-    fn test_durability_optimized_config() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = WalConfig::durability_optimized(temp_dir.path());
-        
-        assert_eq!(config.sync_policy, SyncPolicy::OnBatch);
-        assert!(!config.use_memory_mapping);
-        assert!(config.use_direct_io);
-        assert_eq!(config.max_batch_size, 100);
-        assert!(config.validate().is_ok());
-    }
+    fn test_sync_policy_serialization() {
+        let policies = vec![
+            SyncPolicy::Never,
+            SyncPolicy::Always,
+            SyncPolicy::OnBatch,
+            SyncPolicy::Interval(Duration::from_millis(100)),
+            SyncPolicy::OnShutdown,
+        ];
 
-    #[test]
-    fn test_balanced_config() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = WalConfig::balanced(temp_dir.path());
-        
-        match config.sync_policy {
-            SyncPolicy::Interval(duration) => assert_eq!(duration, Duration::from_millis(100)),
-            _ => panic!("Expected interval sync policy"),
+        for policy in policies {
+            let serialized = serde_json::to_string(&policy).unwrap();
+            let deserialized: SyncPolicy = serde_json::from_str(&serialized).unwrap();
+            
+            match (policy, deserialized) {
+                (SyncPolicy::Never, SyncPolicy::Never) => {},
+                (SyncPolicy::Always, SyncPolicy::Always) => {},
+                (SyncPolicy::OnBatch, SyncPolicy::OnBatch) => {},
+                (SyncPolicy::Interval(d1), SyncPolicy::Interval(d2)) => assert_eq!(d1, d2),
+                (SyncPolicy::OnShutdown, SyncPolicy::OnShutdown) => {},
+                _ => panic!("Sync policy serialization mismatch"),
+            }
         }
-        assert!(config.use_memory_mapping);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_development_config() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = WalConfig::development(temp_dir.path());
-        
-        assert_eq!(config.max_segment_size, 1024 * 1024);
-        assert!(!config.use_memory_mapping);
-        assert_eq!(config.max_batch_size, 10);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_config_builder_pattern() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = WalConfig::new(temp_dir.path())
-            .with_max_segment_size(128 * 1024 * 1024)
-            .with_max_batch_size(5000)
-            .with_sync_policy(SyncPolicy::Never)
-            .with_memory_mapping(false);
-
-        assert_eq!(config.max_segment_size, 128 * 1024 * 1024);
-        assert_eq!(config.max_batch_size, 5000);
-        assert_eq!(config.sync_policy, SyncPolicy::Never);
-        assert!(!config.use_memory_mapping);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_sync_policy_properties() {
-        assert!(SyncPolicy::Always.is_immediate());
-        assert!(!SyncPolicy::Never.is_immediate());
-        assert!(SyncPolicy::Never.is_never());
-        assert!(!SyncPolicy::Always.is_never());
-
-        let interval_policy = SyncPolicy::Interval(Duration::from_millis(100));
-        assert_eq!(interval_policy.interval(), Some(Duration::from_millis(100)));
-        assert!(SyncPolicy::Never.interval().is_none());
-    }
-
-    #[test]
-    fn test_sync_policy_display() {
-        assert_eq!(format!("{}", SyncPolicy::Never), "Never");
-        assert_eq!(format!("{}", SyncPolicy::OnBatch), "OnBatch");
-        assert_eq!(format!("{}", SyncPolicy::Always), "Always");
-        assert_eq!(
-            format!("{}", SyncPolicy::Interval(Duration::from_millis(500))),
-            "Interval(500ms)"
-        );
-    }
-
-    #[test]
-    fn test_memory_usage_estimation() {
-        let config = WalConfig::default();
-        let usage = config.estimated_memory_usage();
-        
-        // Should include buffer size, batch buffer, and overhead
-        assert!(usage > config.buffer_size);
-        assert!(usage > 1024 * 1024); // Should be at least 1MB
-    }
-
-    #[test]
-    fn test_disk_usage_estimation() {
-        let config = WalConfig::default();
-        let usage = config.estimated_daily_disk_usage(1000, 512); // 1000 msgs/sec, 512 bytes avg
-        
-        // Should be reasonable: 1000 * 86400 * (24 + 512) bytes per day
-        let expected = 1000 * 86400 * (24 + 512);
-        assert_eq!(usage, expected);
     }
 }

@@ -8,12 +8,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::task;
 
-use kaelix_storage::wal::{
-    WriteAheadLog, WalConfig, WalError, SyncPolicy, 
-    RecoveryConfig, RecoveryMode, CorruptionPolicy,
-    IntegrityStatus, LogPosition
-};
 use kaelix_core::message::Message;
+use kaelix_storage::wal::{
+    CorruptionPolicy, IntegrityStatus, LogPosition, RecoveryConfig, RecoveryMode, SyncPolicy,
+    WalConfig, WalError, WriteAheadLog,
+};
 use tempfile::TempDir;
 
 /// Utility function to create a test message
@@ -41,7 +40,7 @@ mod performance_tests {
 
         let wal = WriteAheadLog::new(config, temp_dir.path()).await.unwrap();
         let message = create_test_message(0);
-        
+
         let mut latencies = Vec::new();
         let iterations = 1000;
 
@@ -58,8 +57,8 @@ mod performance_tests {
         let p99_latency = latencies[p99_index];
 
         assert!(
-            p99_latency < Duration::from_micros(10), 
-            "P99 latency {} exceeds 10μs target", 
+            p99_latency < Duration::from_micros(10),
+            "P99 latency {} exceeds 10μs target",
             p99_latency.as_micros()
         );
 
@@ -77,24 +76,18 @@ mod performance_tests {
         };
 
         let wal = WriteAheadLog::new(config, temp_dir.path()).await.unwrap();
-        
+
         let batch_size = 1000;
-        let messages: Vec<_> = (0..batch_size)
-            .map(create_test_message)
-            .collect();
+        let messages: Vec<_> = (0..batch_size).map(create_test_message).collect();
 
         let start = Instant::now();
         let _positions = wal.append_batch(messages).await.unwrap();
         let duration = start.elapsed();
 
         let throughput = batch_size as f64 / duration.as_secs_f64();
-        
-        // Target: 10M+ messages/second 
-        assert!(
-            throughput > 100_000.0, 
-            "Throughput {} msg/s below minimum target", 
-            throughput
-        );
+
+        // Target: 10M+ messages/second
+        assert!(throughput > 100_000.0, "Throughput {} msg/s below minimum target", throughput);
 
         wal.shutdown().await.unwrap();
     }
@@ -103,13 +96,10 @@ mod performance_tests {
     #[tokio::test]
     async fn test_concurrent_append_performance() {
         let temp_dir = TempDir::new().unwrap();
-        let config = WalConfig {
-            sync_policy: SyncPolicy::NoSync,
-            ..Default::default()
-        };
+        let config = WalConfig { sync_policy: SyncPolicy::NoSync, ..Default::default() };
 
         let wal = Arc::new(WriteAheadLog::new(config, temp_dir.path()).await.unwrap());
-        
+
         let num_writers = 10;
         let messages_per_writer = 1000;
         let total_messages = num_writers * messages_per_writer;
@@ -137,11 +127,7 @@ mod performance_tests {
         let throughput = total_messages as f64 / duration.as_secs_f64();
 
         // Target: Ensure concurrent throughput maintains high performance
-        assert!(
-            throughput > 50_000.0, 
-            "Concurrent throughput {} msg/s below target", 
-            throughput
-        );
+        assert!(throughput > 50_000.0, "Concurrent throughput {} msg/s below target", throughput);
 
         wal.shutdown().await.unwrap();
     }
@@ -165,21 +151,20 @@ mod recovery_tests {
         // Write some entries then simulate crash
         {
             let mut wal = WriteAheadLog::new(wal_config.clone(), temp_dir.path()).await.unwrap();
-            
+
             // Write messages
             for i in 0..100 {
                 wal.append(create_test_message(i)).await.unwrap();
             }
-            
+
             // Drop wal without clean shutdown to simulate crash
         }
 
         // Recover WAL
-        let (mut wal, recovery_result) = WriteAheadLog::new_with_recovery(
-            wal_config,
-            temp_dir.path(), 
-            recovery_config
-        ).await.unwrap();
+        let (mut wal, recovery_result) =
+            WriteAheadLog::new_with_recovery(wal_config, temp_dir.path(), recovery_config)
+                .await
+                .unwrap();
 
         // Validate recovery
         assert!(recovery_result.segments_recovered > 0);
@@ -207,11 +192,11 @@ mod recovery_tests {
         // Create WAL and write entries
         {
             let mut wal = WriteAheadLog::new(wal_config.clone(), temp_dir.path()).await.unwrap();
-            
+
             for i in 0..50 {
                 wal.append(create_test_message(i)).await.unwrap();
             }
-            
+
             wal.force_sync().await.unwrap();
             wal.shutdown().await.unwrap();
         }
@@ -221,10 +206,7 @@ mod recovery_tests {
         corrupt_segment_file(temp_dir.path()).await;
 
         // Perform recovery
-        let result = WriteAheadLog::recover(
-            temp_dir.path(), 
-            recovery_config
-        ).await.unwrap();
+        let result = WriteAheadLog::recover(temp_dir.path(), recovery_config).await.unwrap();
 
         // Validate recovery
         assert!(result.corrupted_entries > 0);
@@ -233,8 +215,8 @@ mod recovery_tests {
 
     /// Simulate segment file corruption
     async fn corrupt_segment_file(path: &std::path::Path) {
-        use tokio::fs::{OpenOptions, self};
-        use tokio::io::{AsyncWriteExt, AsyncSeekExt};
+        use tokio::fs::{self, OpenOptions};
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
         // Find the first segment file and corrupt it
         let entries = fs::read_dir(path).await.unwrap();
@@ -253,21 +235,15 @@ mod recovery_tests {
             .await;
 
         if let Some(first_segment) = segment_files.first() {
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(first_segment)
-                .await
-                .unwrap();
+            let mut file =
+                OpenOptions::new().read(true).write(true).open(first_segment).await.unwrap();
 
             // Seek to middle of file and write garbage
             file.seek(std::io::SeekFrom::Start(file.metadata().await.unwrap().len() / 2))
                 .await
                 .unwrap();
-            
-            file.write_all(&[0xDE, 0xAD, 0xBE, 0xEF])
-                .await
-                .unwrap();
+
+            file.write_all(&[0xDE, 0xAD, 0xBE, 0xEF]).await.unwrap();
         }
     }
 }
@@ -283,9 +259,7 @@ mod concurrency_tests {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig::default();
 
-        let wal = Arc::new(Mutex::new(
-            WriteAheadLog::new(config, temp_dir.path()).await.unwrap()
-        ));
+        let wal = Arc::new(Mutex::new(WriteAheadLog::new(config, temp_dir.path()).await.unwrap()));
 
         let num_writers = 5;
         let num_readers = 3;
@@ -298,7 +272,7 @@ mod concurrency_tests {
             .map(|writer_id| {
                 let wal = Arc::clone(&wal);
                 let counter = Arc::clone(&write_counter);
-                
+
                 task::spawn(async move {
                     for i in 0..messages_per_writer {
                         let message = create_test_message(writer_id * messages_per_writer + i);
@@ -317,9 +291,10 @@ mod concurrency_tests {
                 let wal = Arc::clone(&wal);
                 let write_counter = Arc::clone(&write_counter);
                 let read_counter = Arc::clone(&read_counter);
-                
+
                 task::spawn(async move {
-                    while write_counter.load(Ordering::Relaxed) < num_writers * messages_per_writer {
+                    while write_counter.load(Ordering::Relaxed) < num_writers * messages_per_writer
+                    {
                         let guard = wal.lock().await;
                         if let Ok(last_position) = guard.current_segment_id().await {
                             if last_position > 0 {
@@ -356,17 +331,12 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_large_batch_handling() {
         let temp_dir = TempDir::new().unwrap();
-        let config = WalConfig {
-            max_batch_size: 10_000,
-            ..Default::default()
-        };
+        let config = WalConfig { max_batch_size: 10_000, ..Default::default() };
 
         let wal = WriteAheadLog::new(config, temp_dir.path()).await.unwrap();
-        
+
         let large_batch_size = 5_000;
-        let messages: Vec<_> = (0..large_batch_size)
-            .map(create_test_message)
-            .collect();
+        let messages: Vec<_> = (0..large_batch_size).map(create_test_message).collect();
 
         let result = wal.append_batch(messages).await;
         assert!(result.is_ok());
@@ -381,13 +351,10 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_sequence_exhaustion() {
         let temp_dir = TempDir::new().unwrap();
-        let config = WalConfig {
-            max_sequence_number: u64::MAX - 100,
-            ..Default::default()
-        };
+        let config = WalConfig { max_sequence_number: u64::MAX - 100, ..Default::default() };
 
         let mut wal = WriteAheadLog::new(config, temp_dir.path()).await.unwrap();
-        
+
         // Fill up to near-exhaustion
         for i in 0..u64::MAX - 110 {
             wal.append(create_test_message(i as usize)).await.unwrap();
@@ -395,7 +362,7 @@ mod edge_case_tests {
 
         // Attempt to write more should result in sequence exhaustion
         let result = wal.append(create_test_message(u64::MAX as usize)).await;
-        
+
         assert!(matches!(result, Err(WalError::SequenceExhausted)));
 
         wal.shutdown().await.unwrap();
@@ -408,13 +375,11 @@ mod edge_case_tests {
         let config = WalConfig::default();
 
         let mut wal = WriteAheadLog::new(config, temp_dir.path()).await.unwrap();
-        
+
         // Start long-running batch append
         let append_task = task::spawn(async move {
-            let messages: Vec<_> = (0..10_000)
-                .map(create_test_message)
-                .collect();
-            
+            let messages: Vec<_> = (0..10_000).map(create_test_message).collect();
+
             wal.append_batch(messages).await
         });
 
@@ -426,7 +391,7 @@ mod edge_case_tests {
 
         // Check task result - should handle shutdown gracefully
         let result = append_task.await.unwrap();
-        
+
         // Depending on exact timing, result could be:
         // 1. Ok (if shutdown happened after batch start)
         // 2. Err (if shutdown interrupted the batch)
@@ -446,9 +411,8 @@ mod integration_tests {
         let config = WalConfig::default();
 
         // Create WAL as StorageEngine
-        let storage_engine: Box<dyn StorageEngine> = Box::new(
-            WriteAheadLog::new(config, temp_dir.path()).await.unwrap()
-        );
+        let storage_engine: Box<dyn StorageEngine> =
+            Box::new(WriteAheadLog::new(config, temp_dir.path()).await.unwrap());
 
         // Write messages through storage engine interface
         let message1 = create_test_message(0);
@@ -456,7 +420,7 @@ mod integration_tests {
 
         // Read back through storage engine
         let read_result = storage_engine.read(write_result.position).await.unwrap();
-        
+
         assert_eq!(read_result.message.id(), "test-0");
 
         // Shutdown
